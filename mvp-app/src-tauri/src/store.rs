@@ -120,7 +120,7 @@ impl Store {
             .map_err(err)?;
         }
         // A previous live request cannot be resumed after process death.
-        db.execute("UPDATE agents SET status='unknown',detail='이전 실행이 중단됐어. 열린 호출은 자동 재개하지 않아.',updated_at=?1 WHERE status NOT IN ('idle','completed','failed','cancelled','unknown')", [timestamp()]).map_err(err)?;
+        db.execute("UPDATE agents SET status='unknown',detail='이전 실행이 중단됐습니다. 열린 호출은 자동 재개하지 않습니다.',updated_at=?1 WHERE status NOT IN ('idle','completed','failed','cancelled','unknown')", [timestamp()]).map_err(err)?;
         db.execute(
             "UPDATE tool_deliveries SET state='unknown' WHERE state IN ('prepared','sent')",
             [],
@@ -183,7 +183,7 @@ impl Store {
                 [&local_id],
                 |r| r.get(0),
             )
-            .map_err(|_| "세션을 찾을 수 없어".to_string())?;
+            .map_err(|_| "세션을 찾을 수 없습니다".to_string())?;
         if speaker == "user" {
             tx.execute("UPDATE meta SET version=version+1", [])
                 .map_err(err)?;

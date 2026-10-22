@@ -163,7 +163,7 @@ impl Store {
             let usage: Usage = serde_json::from_value(p["tokenUsage"].clone()).map_err(err)?;
             state.usage = Some(usage); state.usage_updated_at = Some(timestamp()); state.usage_stale = false;
         } else {
-            let id = p["item"]["id"].as_str().ok_or("압축 item ID가 없어")?;
+            let id = p["item"]["id"].as_str().ok_or("압축 item ID가 없습니다")?;
             if event["method"] == "item/started" {
                 if state.compaction_item_id.as_deref() != Some(id) {
                     state.compaction = "compacting".into(); state.compaction_item_id = Some(id.into()); state.usage_stale = true;
@@ -192,7 +192,7 @@ impl Store {
             .query_row("SELECT thread_id FROM chat_sessions WHERE id=?1", [session], |r| r.get(0))
             .map_err(err)?;
         if bound.as_deref() != Some(thread) {
-            return Err("이 세션의 Codex 스레드가 현재 연결과 일치하지 않아".into());
+            return Err("이 세션의 Codex 스레드가 현재 연결과 일치하지 않습니다".into());
         }
         let mut state = read(&db)?.into_iter().find(|s| s.session_id == session && s.thread_id == thread).unwrap_or(Context {
             session_id: session.into(), thread_id: thread.into(), usage: None, usage_updated_at: None,

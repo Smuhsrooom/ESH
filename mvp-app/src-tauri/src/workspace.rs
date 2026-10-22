@@ -14,7 +14,7 @@ pub struct Room {
 fn name(value: &str) -> Result<String> {
     let value = value.trim();
     if value.is_empty() || value.chars().count() > 100 {
-        return Err("이름은 1~100자로 입력해줘".into());
+        return Err("이름은 1~100자로 입력해 주세요".into());
     }
     Ok(value.into())
 }
@@ -123,7 +123,7 @@ impl Store {
         let mut db = self.db.lock().map_err(err)?;
         let tx = db.transaction().map_err(err)?;
         let changed = tx.execute("UPDATE chat_sessions SET model=?1,reasoning_effort=?2 WHERE id=?3", params![settings.model, settings.reasoning_effort, id]).map_err(err)?;
-        if changed != 1 { return Err("세션을 찾을 수 없어".into()); }
+        if changed != 1 { return Err("세션을 찾을 수 없습니다".into()); }
         tx.execute("UPDATE meta SET revision=revision+1", []).map_err(err)?;
         tx.commit().map_err(err)
     }
@@ -140,7 +140,7 @@ impl Store {
             "INSERT INTO rooms VALUES(?1,?2,?3)",
             params![room.id, room.name, room.created_at],
         )
-        .map_err(|e| format!("프로젝트·룸 생성 실패 (이름 중복 여부를 확인해줘): {e}"))?;
+        .map_err(|e| format!("프로젝트·룸 생성 실패 (이름 중복 여부를 확인해 주세요): {e}"))?;
         tx.execute("UPDATE meta SET revision=revision+1", [])
             .map_err(err)?;
         tx.commit().map_err(err)?;
@@ -153,7 +153,7 @@ impl Store {
         sessions(&*self.db.lock().map_err(err)?)?
             .into_iter()
             .find(|s| s.id == id)
-            .ok_or("세션을 찾을 수 없어".into())
+            .ok_or("세션을 찾을 수 없습니다".into())
     }
     pub fn session_version(&self, id: &str) -> Result<i64> {
         self.db
@@ -184,7 +184,7 @@ impl Store {
         history: &[Value],
     ) -> Result<Session> {
         if !["new", "copy", "resume"].contains(&mode) {
-            return Err("지원하지 않는 가져오기 방식이야".into());
+            return Err("지원하지 않는 가져오기 방식입니다".into());
         }
         let value = name(value)?;
         let id = uuid::Uuid::new_v4().to_string();
@@ -196,7 +196,7 @@ impl Store {
         };
         let mut db = self.db.lock().map_err(err)?;
         let tx = db.transaction().map_err(err)?;
-        tx.execute("INSERT INTO chat_sessions(id,room_id,name,thread_id,source_thread_id,mode,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7)",params![id,room_id,value,thread,source,mode,at]).map_err(|e|format!("세션 추가 실패 (대상 룸이나 중복 추가를 확인해줘): {e}"))?;
+        tx.execute("INSERT INTO chat_sessions(id,room_id,name,thread_id,source_thread_id,mode,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7)",params![id,room_id,value,thread,source,mode,at]).map_err(|e|format!("세션 추가 실패 (대상 룸이나 중복 추가를 확인해 주세요): {e}"))?;
         for entry in history {
             let speaker = entry["speaker"].as_str().unwrap_or("codex");
             let content = entry["content"].as_str().unwrap_or("");

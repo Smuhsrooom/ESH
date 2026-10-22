@@ -29,15 +29,15 @@ pub struct CodexModel {
 
 pub fn validate(models: &[CodexModel], settings: &ModelSettings) -> Result<()> {
     let Some(id) = settings.model.as_deref() else {
-        return if settings.reasoning_effort.is_none() { Ok(()) } else { Err("모델을 먼저 선택해줘".into()) };
+        return if settings.reasoning_effort.is_none() { Ok(()) } else { Err("모델을 먼저 선택해 주세요".into()) };
     };
     let model = models.iter().find(|m| m.model == id && !m.hidden)
-        .ok_or("현재 Codex 목록에 없는 모델이야. 목록을 새로 불러와줘.")?;
+        .ok_or("현재 Codex 목록에 없는 모델입니다. 목록을 새로 불러와 주세요.")?;
     let valid = settings.reasoning_effort.as_deref().is_some_and(|effort| {
         model.supported_reasoning_efforts.iter().any(|e| e.reasoning_effort == effort)
             || (model.supported_reasoning_efforts.is_empty() && effort == model.default_reasoning_effort)
     });
-    if !valid { return Err("이 모델이 지원하지 않는 추론 강도야. 다시 선택해줘.".into()); }
+    if !valid { return Err("선택한 추론 강도는 이 모델에서 지원하지 않습니다. 다시 선택해 주세요.".into()); }
     Ok(())
 }
 

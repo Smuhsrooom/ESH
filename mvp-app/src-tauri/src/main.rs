@@ -107,7 +107,7 @@ async fn import_codex_session(
     engine: tauri::State<'_, Arc<Engine>>,
 ) -> Result<store::Session> {
     if mode != "copy" && mode != "resume" {
-        return Err("가져오기 방식을 선택해줘".into());
+        return Err("가져오기 방식을 선택해 주세요".into());
     }
     let mut rpc = cli::Rpc::start(engine.store.clone()).await?;
     let result = async {
@@ -127,7 +127,7 @@ async fn import_codex_session(
     }
     if mode == "resume" && thread["status"]["type"] == "active" {
         return Err(
-            "현재 실행 중인 원본 세션이야. 완료 후 추가하거나 기록 가져오기를 선택해줘.".into(),
+            "현재 실행 중인 원본 세션입니다. 완료 후 추가하거나 기록 가져오기를 선택해 주세요.".into(),
         );
     }
     let session = engine
@@ -150,7 +150,7 @@ fn get_probe_mode() -> Option<String> {
 #[tauri::command]
 fn record_gui_probe(payload: Value, engine: tauri::State<'_, Arc<Engine>>) -> Result<()> {
     if !cfg!(debug_assertions) || std::env::var_os("ESH_GUI_PROBE").is_none() {
-        return Err("GUI 검증 모드가 아니야".into());
+        return Err("GUI 검증 모드가 아닙니다".into());
     }
     let path = engine.data_dir.join("gui-probe.json");
     std::fs::write(
@@ -163,7 +163,7 @@ fn record_gui_probe(payload: Value, engine: tauri::State<'_, Arc<Engine>>) -> Re
 #[tauri::command]
 async fn close_probe(app: tauri::AppHandle, engine: tauri::State<'_, Arc<Engine>>) -> Result<()> {
     if !cfg!(debug_assertions) || std::env::var_os("ESH_GUI_PROBE").is_none() {
-        return Err("GUI 검증 모드가 아니야".into());
+        return Err("GUI 검증 모드가 아닙니다".into());
     }
     engine.shutdown().await?;
     app.exit(0);
@@ -223,5 +223,5 @@ fn main() {
             }
         })
         .run(tauri::generate_context!())
-        .expect("ESH 앱 시작에 실패했어");
+        .expect("ESH 앱 시작에 실패했습니다");
 }

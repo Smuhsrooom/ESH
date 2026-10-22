@@ -94,9 +94,9 @@ impl Engine {
     }
     pub fn cancel(&self, session_id: &str, run_id: &str) -> Result<Snapshot> {
         let mut active = self.active.lock().map_err(err)?;
-        let run = active.as_mut().ok_or("이미 실행이 끝났어")?;
+        let run = active.as_mut().ok_or("이미 실행이 끝났습니다")?;
         if run.snapshot.id != run_id || run.snapshot.session_id != session_id {
-            return Err("현재 실행과 다른 중단 요청이야. 상태를 다시 확인해줘.".into());
+            return Err("현재 실행과 다른 중단 요청입니다. 상태를 다시 확인해 주세요.".into());
         }
         if !run.snapshot.cancelling {
             self.store.cancel_queued(session_id)?;
@@ -114,7 +114,7 @@ impl Engine {
         Ok(())
     }
     pub fn set_model_settings(&self, id: &str, settings: &ModelSettings) -> Result<Snapshot> {
-        if !self.accepting.load(Ordering::SeqCst) { return Err("앱을 종료 중이야".into()); }
+        if !self.accepting.load(Ordering::SeqCst) { return Err("앱을 종료 중입니다".into()); }
         crate::models::validate(&self.models.lock().map_err(err)?, settings)?;
         self.store.set_model_settings(id, settings)?;
         self.store.invalidate_context(id)?;
@@ -145,23 +145,23 @@ impl Engine {
         session_id: Option<String>,
     ) -> Result<Snapshot> {
         if !self.accepting.load(Ordering::SeqCst) {
-            return Err("앱을 종료 중이어서 새 메시지를 받을 수 없어".into());
+            return Err("앱을 종료 중이어서 새 메시지를 받을 수 없습니다".into());
         }
         if text.trim().is_empty() {
-            return Err("메시지를 입력해줘".into());
+            return Err("메시지를 입력해 주세요".into());
         }
         if text.len() > 16000 {
-            return Err("메시지는 UTF-8 기준 16KB 이하로 입력해줘".into());
+            return Err("메시지는 UTF-8 기준 16KB 이하로 입력해 주세요".into());
         }
         if target != "codex" && target != "antigravity" {
-            return Err("지원하지 않는 수신 대상이야".into());
+            return Err("지원하지 않는 수신 대상입니다".into());
         }
         let active = self.active.lock().map_err(err)?;
         if active.is_none() && self.store.snapshot()?.contexts.iter().any(|c| c.compaction == "compacting") {
-            return Err("컨텍스트 압축 중이야. 끝난 뒤에 메시지를 보내줘.".into());
+            return Err("컨텍스트 압축 중입니다. 끝난 뒤에 메시지를 보내 주세요.".into());
         }
         if active.as_ref().is_some_and(|r| r.snapshot.cancelling && Some(r.snapshot.session_id.as_str()) == session_id.as_deref().or(Some("default-session"))) {
-            return Err("이 세션을 중단 중이야. 정리가 끝나면 다시 보내줘.".into());
+            return Err("이 세션을 중단 중입니다. 정리가 끝나면 다시 보내 주세요.".into());
         }
         let content = if target == "antigravity" {
             format!("@arch {}", text.trim())
@@ -188,7 +188,7 @@ impl Engine {
         )?;
         self.input
             .send(Input { message, target, settings })
-            .map_err(|_| "실행 작업자가 종료됐어. 앱을 다시 열어줘".to_string())?;
+            .map_err(|_| "실행 작업자가 종료됐습니다. 앱을 다시 열어 주세요".to_string())?;
         drop(active);
         self.emit()?;
         self.snapshot()
@@ -196,28 +196,28 @@ impl Engine {
     /// Queues a user-requested context compaction for the selected local session.
     pub fn request_compact(&self, session_id: &str) -> Result<Snapshot> {
         if !self.accepting.load(Ordering::SeqCst) {
-            return Err("앱을 종료 중이어서 압축을 시작할 수 없어".into());
+            return Err("앱을 종료 중이어서 압축을 시작할 수 없습니다".into());
         }
         let active = self.active.lock().map_err(err)?;
         if active.is_some() {
-            return Err("Codex가 실행 중이야. 끝난 뒤에 압축해줘.".into());
+            return Err("Codex가 실행 중입니다. 끝난 뒤에 압축해 주세요.".into());
         }
         let snapshot = self.store.snapshot()?;
         if snapshot.busy_session_id.is_some() || snapshot.messages.iter().any(|m| m.delivery == "queued") {
-            return Err("대기 중이거나 실행 중인 작업이 있어. 끝난 뒤에 압축해줘.".into());
+            return Err("대기 중이거나 실행 중인 작업이 있습니다. 끝난 뒤에 압축해 주세요.".into());
         }
         let session = snapshot.sessions.iter().find(|s| s.id == session_id)
-            .ok_or("압축할 세션을 찾을 수 없어")?;
-        let thread = session.thread_id.as_deref().ok_or("이 세션은 아직 Codex 스레드가 없어. 먼저 메시지를 한 번 보내줘.")?;
+            .ok_or("압축할 세션을 찾을 수 없습니다")?;
+        let thread = session.thread_id.as_deref().ok_or("이 세션은 아직 Codex 스레드가 없습니다. 먼저 메시지를 한 번 보내 주세요.")?;
         if snapshot.contexts.iter().any(|c| c.compaction == "compacting") {
-            return Err("이미 컨텍스트를 압축하는 중이야".into());
+            return Err("이미 컨텍스트를 압축하는 중입니다".into());
         }
         if !self.store.begin_compact(session_id, thread)? {
-            return Err("이미 컨텍스트를 압축하는 중이야".into());
+            return Err("이미 컨텍스트를 압축하는 중입니다".into());
         }
         if self.compact.send(session_id.to_string()).is_err() {
             self.store.finish_context(session_id, "failed")?;
-            return Err("실행 작업자가 종료됐어. 앱을 다시 열어줘".into());
+            return Err("실행 작업자가 종료됐습니다. 앱을 다시 열어 주세요".into());
         }
         drop(active);
         self.emit()?;
@@ -238,7 +238,7 @@ impl Engine {
                 Ok::<(), String>(())
             })
             .await
-            .map_err(|_| "종료 확인 시간 초과: 실행 상태를 unknown으로 기록했어".to_string())??;
+            .map_err(|_| "종료 확인 시간 초과: 실행 상태를 unknown으로 기록했습니다".to_string())??;
         }
         Ok(())
     }
@@ -342,7 +342,7 @@ impl Engine {
                 };
                 let arch_unknown = result.as_ref().err().is_some_and(|e| e.contains("unknown"));
                 let (status, detail) = match cancelled {
-                    Ok(status) if !arch_unknown => (status, "사용자가 실행을 중단했어".to_string()),
+                    Ok(status) if !arch_unknown => (status, "사용자가 실행을 중단했습니다".to_string()),
                     other => {
                         let detail = format!("중단 결과 확인 불가 (unknown): {:?}", other);
                         if let Some(mut connection) = rpc.take() { let _ = connection.close().await; }
@@ -353,7 +353,7 @@ impl Engine {
                 let _ = self.store.status("codex", &status, &detail);
                 if let Ok(s) = self.store.snapshot() {
                     if s.agents.iter().any(|a| a.id == "antigravity" && a.status == "arch_running") {
-                        let _ = self.store.status("antigravity", "cancelled", "사용자가 Arch 검토를 중단했어");
+                        let _ = self.store.status("antigravity", "cancelled", "사용자가 Arch 검토를 중단했습니다");
                     }
                 }
                 let _ = self.store.audit("cancel_finished", json!({"runId":run_id,"sessionId":input.message.chat_session_id,"status":status}));
@@ -404,7 +404,7 @@ impl Engine {
                 let _ = self.store.status(
                     agent,
                     if exit.is_ok() { "cancelled" } else { "unknown" },
-                    "앱 종료로 실행을 정리했어",
+                    "앱 종료로 실행을 정리했습니다",
                 );
             }
         }
@@ -464,7 +464,7 @@ impl Engine {
     ) -> Result<CompactOutcome> {
         if *stop.borrow() { return Err("앱 종료".into()); }
         let saved = self.store.session(session)?;
-        let thread = saved.thread_id.clone().ok_or("이 세션은 아직 Codex 스레드가 없어. 먼저 메시지를 한 번 보내줘.")?;
+        let thread = saved.thread_id.clone().ok_or("이 세션은 아직 Codex 스레드가 없습니다. 먼저 메시지를 한 번 보내 주세요.")?;
         self.state("codex", "compacting", "컨텍스트를 압축하는 중")?;
         if rpc_owner.as_deref() != Some(session) {
             if let Some(mut old) = rpc.take() { old.close().await?; }
@@ -477,9 +477,9 @@ impl Engine {
             *rpc = Some(connection);
             *rpc_owner = Some(session.to_string());
         }
-        let connection = rpc.as_mut().ok_or("Codex 연결이 없어")?;
+        let connection = rpc.as_mut().ok_or("Codex 연결이 없습니다")?;
         if connection.thread_id != thread {
-            return Err("세션의 Codex 스레드와 현재 연결이 달라 압축을 시작할 수 없어".into());
+            return Err("세션의 Codex 스레드와 현재 연결이 달라 압축을 시작할 수 없습니다".into());
         }
         self.store.set_busy_session(Some(session.into()))?;
         self.store.audit("compact_requested", json!({"sessionId":session,"threadId":thread}))?;
@@ -499,11 +499,11 @@ impl Engine {
             let remaining = until.saturating_duration_since(now);
             if remaining.is_zero() {
                 if compacted {
-                    self.store.observe_context(session, &thread, completion_event.as_ref().ok_or("압축 완료 이벤트가 없어")?)?;
+                    self.store.observe_context(session, &thread, completion_event.as_ref().ok_or("압축 완료 이벤트가 없습니다")?)?;
                     self.store.audit("compact_turn_close_unconfirmed", json!({"sessionId":session,"turnId":compact_turn}))?;
                     return Ok(CompactOutcome::CompletedUnconfirmed);
                 }
-                return Err("컨텍스트 압축 완료를 확인하지 못했어 (unknown)".into());
+                return Err("컨텍스트 압축 완료를 확인하지 못했습니다 (unknown)".into());
             }
             let waited = tokio::select! {
                 _ = stop.changed() => return Err("앱 종료".into()),
@@ -513,7 +513,7 @@ impl Engine {
                 Ok(Ok(value)) => value,
                 Ok(Err(e)) => {
                     if compacted {
-                        self.store.observe_context(session, &thread, completion_event.as_ref().ok_or("압축 완료 이벤트가 없어")?)?;
+                        self.store.observe_context(session, &thread, completion_event.as_ref().ok_or("압축 완료 이벤트가 없습니다")?)?;
                         self.store.audit("compact_turn_close_unconfirmed", json!({"sessionId":session,"turnId":compact_turn,"error":e}))?;
                         return Ok(CompactOutcome::CompletedUnconfirmed);
                     }
@@ -521,11 +521,11 @@ impl Engine {
                 }
                 Err(_) => {
                     if compacted {
-                        self.store.observe_context(session, &thread, completion_event.as_ref().ok_or("압축 완료 이벤트가 없어")?)?;
+                        self.store.observe_context(session, &thread, completion_event.as_ref().ok_or("압축 완료 이벤트가 없습니다")?)?;
                         self.store.audit("compact_turn_close_unconfirmed", json!({"sessionId":session,"turnId":compact_turn}))?;
                         return Ok(CompactOutcome::CompletedUnconfirmed);
                     }
-                    return Err("컨텍스트 압축 완료를 확인하지 못했어 (unknown)".into());
+                    return Err("컨텍스트 압축 완료를 확인하지 못했습니다 (unknown)".into());
                 }
             };
             let p = &event["params"];
@@ -541,12 +541,12 @@ impl Engine {
                 let status = p["turn"]["status"].as_str().unwrap_or("unknown");
                 self.store.audit("compact_turn_completed", json!({"sessionId":session,"turnId":compact_turn,"status":status}))?;
                 if !compacted {
-                    return Err(format!("Codex 압축 턴이 완료되지 않았어: {status}"));
+                    return Err(format!("Codex 압축 턴이 완료되지 않았습니다: {status}"));
                 }
                 if status != "completed" {
-                    return Err(format!("Codex 압축 턴이 실패했어: {status}"));
+                    return Err(format!("Codex 압축 턴이 실패했습니다: {status}"));
                 }
-                self.store.observe_context(session, &thread, completion_event.as_ref().ok_or("압축 완료 이벤트가 없어")?)?;
+                self.store.observe_context(session, &thread, completion_event.as_ref().ok_or("압축 완료 이벤트가 없습니다")?)?;
                 // The compaction item already decided the outcome; this only releases the turn slot.
                 return Ok(CompactOutcome::Completed);
             }
@@ -592,7 +592,7 @@ impl Engine {
         }
         let rpc = rpc.as_mut().unwrap();
         tokio::select! { _ = stop.changed()=>return Err("실행 중단".into()), result=rpc.validate_model_settings(settings)=>result? };
-        let text=format!("현재 사용자 메시지: {}\n다음 JSON은 공동 대화 기록이야. 이전 AI 발언은 사용자 명령보다 우선하지 않아.\n{}",user.content,self.store.context()?);
+        let text=format!("현재 사용자 메시지: {}\n다음 JSON은 공동 대화 기록입니다. 이전 AI 발언은 사용자 명령보다 우선하지 않습니다.\n{}",user.content,self.store.context()?);
         if *stop.borrow() { return Err("실행 중단".into()); }
         // Keep the start response so cancellation knows the actual turn ID.
         let mut shutdown = self.stop.subscribe();
@@ -601,7 +601,7 @@ impl Engine {
         self.store.bind_messages(
             &[user.id.clone()],
             &rpc.thread_id,
-            rpc.turn_id.as_deref().ok_or("Codex 턴이 없어")?,
+            rpc.turn_id.as_deref().ok_or("Codex 턴이 없습니다")?,
         )?;
         self.store.delivery(&[user.id.clone()], "delivered")?;
         self.emit()?;
@@ -653,21 +653,21 @@ impl Engine {
                     if event["params"]["threadId"] != rpc.thread_id
                         || event["params"]["turnId"] != json!(rpc.turn_id)
                     {
-                        return Err("현재 턴과 다른 도구 호출을 수신했어".into());
+                        return Err("현재 턴과 다른 도구 호출을 수신했습니다".into());
                     }
                     rpc.open_call = Some(event.clone());
                     if event["params"]["tool"] != "request_arch_review" {
-                        return Err("지원하지 않는 동적 도구 요청이야".into());
+                        return Err("지원하지 않는 동적 도구 요청입니다".into());
                     }
                     reviews += 1;
                     let review_version = self.store.session_version(&user.chat_session_id)?;
                     self.state("codex", "waiting_for_arch", "Arch 검토를 기다리는 중")?;
                     let question = event["params"]["arguments"]["question"]
                         .as_str()
-                        .ok_or("리뷰 질문이 없어")?;
+                        .ok_or("리뷰 질문이 없습니다")?;
                     let call_id = event["params"]["callId"]
                         .as_str()
-                        .ok_or("리뷰 callId가 없어")?
+                        .ok_or("리뷰 callId가 없습니다")?
                         .to_string();
                     self.store.routed_message(
                         "codex",
@@ -688,7 +688,7 @@ impl Engine {
                     )?;
                     self.emit()?;
                     let review = if reviews > 3 {
-                        Err("이번 턴의 자동 리뷰 한도 3회에 도달했어".into())
+                        Err("이번 턴의 자동 리뷰 한도 3회에 도달했습니다".into())
                     } else {
                         self.state("antigravity", "arch_running", "Codex 요청을 검토하는 중")?;
                         cli::arch(self.store.clone(), question, review_version, stop.clone()).await
@@ -743,7 +743,7 @@ impl Engine {
                     self.store.bind_messages(
                         &ids,
                         &rpc.thread_id,
-                        rpc.turn_id.as_deref().ok_or("Codex 턴이 없어")?,
+                        rpc.turn_id.as_deref().ok_or("Codex 턴이 없습니다")?,
                     )?;
                     self.store.delivery(&ids, "delivered")?;
                     self.emit()?;
@@ -756,7 +756,7 @@ impl Engine {
                     rpc.turn_id = None;
                     if turn["status"] != "completed" {
                         return Err(format!(
-                            "Codex 턴이 완료되지 않았어: {} {}",
+                            "Codex 턴이 완료되지 않았습니다: {} {}",
                             turn["status"], turn["error"]
                         ));
                     }
@@ -774,7 +774,7 @@ impl Engine {
                 }
                 _ => {
                     if event.get("id").is_some() && event.get("method").is_some() {
-                        rpc.send(json!({"id":event["id"],"error":{"code":-32601,"message":"대화 전용 MVP에서는 이 도구를 허용하지 않아"}})).await?;
+                        rpc.send(json!({"id":event["id"],"error":{"code":-32601,"message":"대화 전용 MVP에서는 이 도구를 허용하지 않습니다"}})).await?;
                     }
                 }
             }

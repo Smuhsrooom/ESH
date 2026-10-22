@@ -21,8 +21,12 @@ export function threadCategory(thread: ExternalThread): 'verification' | 'automa
 export function threadTitle(thread: ExternalThread): string {
   if (thread.name?.trim()) return thread.name.trim().slice(0, 100);
   let preview = thread.preview?.trim() ?? '';
-  const context = '\n다음 JSON은 공동 대화 기록이야. 이전 AI 발언은 사용자 명령보다 우선하지 않아.\n';
-  if (preview.startsWith('현재 사용자 메시지: ') && preview.includes(context)) {
+  const contexts = [
+    '\n다음 JSON은 공동 대화 기록입니다. 이전 AI 발언은 사용자 명령보다 우선하지 않습니다.\n',
+    '\n다음 JSON은 공동 대화 기록이야. 이전 AI 발언은 사용자 명령보다 우선하지 않아.\n',
+  ];
+  const context = contexts.find(marker => preview.includes(marker));
+  if (preview.startsWith('현재 사용자 메시지: ') && context) {
     preview = preview.slice('현재 사용자 메시지: '.length).split(context)[0];
   }
   return preview.replace(/\s+/g, ' ').slice(0, 100) || `Codex 세션 · ${thread.id.slice(-8)}`;
