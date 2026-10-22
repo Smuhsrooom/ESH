@@ -1,0 +1,292 @@
+# ESH 진행 상태와 개발 인계
+
+확인일: 2026-10-18. 현재 실행 파일 대상은 `esh-chat-mvp4`, 패키지 버전은 `0.1.0`이야. 아래 초기 검증 표는 인계 문서 작성 당시 결과이며, 후속 수정은 별도로 기록해.
+
+## 수동 압축 요청·완료 일치성 점검 (2026-10-22)
+
+- 압축 요청을 worker 큐에 넣기 전에 SQLite 상태를 `compacting`으로 예약해 연속 클릭이 중복 RPC로 이어지지 않게 했어. Codex 실행 중·대기 메시지가 있을 때 압축을 거절하고, 수동 압축 중 새 메시지도 거절해 단일 worker 순서를 유지해.
+- 수동 압축은 받은 이벤트의 스레드 ID, 새 압축 턴 ID, 시작된 `contextCompaction` 항목 ID가 모두 일치할 때만 완료 후보로 받아. 해당 턴이 정상 종료하면 완료 상태를 기록해. 명시적 실패는 `failed`, 연결 종료·완료 미확인은 `unknown`으로 정리하고 끊긴 RPC 연결을 닫아 다음 작업에서 새로 연결해. 항목 완료는 확인했지만 턴 종료 확인이 안 되면 완료로 기록하되 연결을 닫고 감사 로그에 종료 미확인을 남겨.
+- `npm test`의 Rust 테스트 17개, `npm run build`, 같은 `esh-chat-mvp4.exe`의 `npm run build:desktop` 통과. 이벤트 ID 불일치 거부, 중복 예약, 실패·unknown 뒤 재요청을 단위 검사했어. 실제 WebView·Codex App Server 검사 `mvp-app/evidence/compact-20261022-234021/result.json`에서 수동 압축 RPC 1회, 압축 중→완료, 시작·완료 항목 ID 일치, 같은 스레드와 기존 메시지 2개 보존을 확인했어. Mock 응답은 없고 격리 DB를 사용했어. 연결 종료·명시적 실패를 실제 CLI에서 강제로 재현한 검사는 아니야.
+
+## 클릭 후 포커스 테두리 정리 (2026-10-22)
+
+- WebView가 클릭한 요소에 `:focus-visible`을 남겨도 테두리가 보이지 않도록 입력 방식을 구분해. 포인터 클릭 후에는 외곽선을 숨기고 Tab·방향키로 이동하면 중립색 포커스 선을 보여. 입력창 바깥 테두리도 클릭만으로 밝아지지 않게 했어. 버튼 선택 상태와 기능은 유지해.
+- `npm run build`와 같은 `esh-chat-mvp4.exe`의 `npm run build:desktop` 통과. 실제 Tauri WebView 복원 검사 `mvp-app/evidence/panels-final-20261022-230417/result.json`의 `final-restored-gui.json`에서 클릭 후 `pointerOutline=none`, 키보드 이동 후 `keyboardOutline=solid`를 확인했어. 기존 실제 CLI 대화 6개, 구버전 기록 4개, 협업 패널 읽기 전용·크기 조절도 통과했어. 격리 DB 복사본을 썼고 새 AI 요청은 보내지 않았어.
+
+## AI 협업 스레드 목록·상세 전환 (2026-10-19)
+
+- 오른쪽 패널을 스레드 전체 목록과 선택한 상세 대화의 두 화면으로 분리했어. 상세 상단의 뒤로 가기를 누르면 목록으로 돌아가고, 중앙 협업 카드에서는 최신 스레드를 바로 열어. 세션을 바꾸면 목록으로 돌아가. 실제 collaborationId로 묶인 메시지만 표시하며 오른쪽은 계속 읽기 전용이야.
+- `npm run build`, 동일 `esh-chat-mvp4.exe`의 `npm run build:desktop` 통과. 실행 중인 앱의 파일 잠금 때문에 사용자가 앱을 닫은 뒤 빌드했어. 최종 실제 WebView 복원 검사 `mvp-app/evidence/panels-final-20261019-234831/result.json`에서 스레드 목록→상세→뒤로 가기, 중앙 협업 카드→상세, 스레드별 기존 실제 CLI 메시지 6개·구버전 기록 4개 보존, 오른쪽 읽기 전용·패널 너비 조절을 확인했어. 격리 DB를 썼고 새 AI 호출은 없었어.
+
+## 마크다운 제목·볼드 크기 균형 (2026-10-19)
+
+- 일반 본문을 키운 뒤에도 중앙 H1/H2/H3가 21/18/16px, 협업 H1/H2가 18/16px로 남아 제목이 과하게 커 보였어. 중앙은 18/16/14px, 협업은 16/14/13px(H1/H2/H3)로 낮추고 제목 위아래 간격과 볼드 굵기를 줄였어. 볼드는 본문과 같은 글자 크기야.
+- 동일 `esh-chat-mvp4.exe`의 `npm run build:desktop` 통과. 실제 WebView의 합성 마크다운 검증 `mvp-app/evidence/markdown-20261019-233946/result.json`에서 중앙 본문/볼드 13px·H1 18px, 협업 본문 12px·H2 14px, 표·코드·링크·HTML 차단과 원문 보존을 확인했어. 실제 AI 호출은 없었어.
+- 앞선 `markdown-20261019-233832`, `233907`은 검증기가 답변 안의 볼드 대신 카드 상단 발화자 이름을 측정해 실패했어. 원인을 고쳐 재검사했고 실패 기록은 보존했어.
+
+## 글자 크기 균형·창 상태 복원 (2026-10-19)
+
+- 협업 상세 본문은 14px에서 12px로 낮추고 제목·표·코드도 함께 조정했어. 중앙 대화·입력창은 11px에서 13px, 왼쪽 탐색기 주요 항목은 11px에서 13px로 키웠어. 보조 정보도 8~9px 대신 대체로 10~11px로 올렸어.
+- 시작 시 강제 최대화를 제거하고 정상 종료 때 창의 내용 영역 크기·바깥 위치·최대화 여부를 `window-state.json`에 저장해. 다음 실행은 이 상태를 복원해. 첫 실행은 1600×900 가운데 창을 보여. 화면 밖 위치는 가운데로 옮겨. 검증 시 `ESH_DATA_DIR`로 창 상태와 DB를 함께 격리해.
+- `npm run build:desktop` 통과(동일 `esh-chat-mvp4.exe`). 실제 WebView 복원 검사 `mvp-app/evidence/panels-final-20261019-233342/result.json`에서 협업 본문 12px, 중앙 본문 13px 이상, 기존 실제 대화 6개·구버전 기록 4개 보존과 읽기 전용·패널 크기 조절을 확인했어.
+- 실제 창 종료·재실행 검사 `mvp-app/evidence/window-restore-20261019-233329/result.json`에서 일반 창이 100,80 위치와 1120×720 바깥 크기로 정확히 복원되고 최대화 상태도 재실행 후 유지됐어. 첫 검증 `window-restore-20261019-232859`는 초기 생성 중인 작은 창을 선택해 시간 초과했고, 다음 `233105`는 같은 문제, `233228`은 바깥 크기를 내용 영역 크기로 설정해 테두리만큼 커졌어. 실패 증거를 보존했고 창 선택 및 저장 기준을 고쳐 최종 검사를 통과했어. 강제 종료 시 마지막 창 상태 저장은 보장하지 않아.
+
+## 협업 패널 가독성 조정 (2026-10-19)
+
+- 오른쪽 검토 목록 제목을 2줄까지 읽을 수 있게 하고 본문 글자를 10px에서 14px로 키웠어. 메시지 카드는 패널 너비를 쓰며, 긴 표는 카드 내부에서 가로 스크롤해. 목록 높이를 제한하고 상세 상단의 중복된 긴 요청 제목은 짧은 `검토 대화` 헤더로 바꿨어. 기본 협업 패널 너비는 340px에서 520px로 늘렸어. 기존 저장 너비가 이보다 좁으면 한 번만 520px 이상으로 보정하고 이후 사용자 조절 값은 유지해.
+- `npm run build`, 동일 `esh-chat-mvp4.exe`의 `npm run build:desktop` 통과. 처음 데스크톱 빌드는 실행 중인 PID 51532의 파일 잠금으로 멈췄고, 사용자가 앱을 닫은 뒤 같은 파일명으로 다시 빌드했어.
+- 실제 Tauri WebView 복원 검사 `mvp-app/evidence/panels-final-20261019-232056/result.json` 통과. 저장된 실제 CLI 대화 6개와 구버전 기록 4개를 격리 DB에서 복원했고, 협업 본문 계산 글자 크기 14px 이상·카드 폭·중복 제목 제거, 읽기 전용·패널 크기 조절을 확인했어. 검증 창의 협업 패널 초기 폭은 550px이었어. 수동 픽셀 비교는 하지 않았어.
+
+## 창 크기·포커스·헤더·사이드바 정리 (2026-10-19)
+
+- 새 창은 작업 영역에 최대화해 열어. 클릭 뒤 남는 파란 포커스 테두리를 중립색의 얇은 키보드 포커스 표시로 바꾸고 마우스 포커스의 불필요한 외곽선을 없앴어.
+- 중앙 헤더의 Codex Lead 제목을 선택 세션 이름으로 바꾸고 모델을 아래에 표시해. 헤더 오른쪽 상태 표시와 협업 패널 하단 읽기 전용 안내를 제거했어. 실제 에이전트 상태는 왼쪽 Agents 화면의 Connections 카드에서 계속 보여.
+- 입력창은 3줄/최소 84px에서 2줄/최소 58px로 낮췄어. 수동 크기 조절과 모델·전송·압축 기능은 유지해.
+- `npm run build`, `npm run build:desktop` 통과. 같은 `esh-chat-mvp4.exe`의 실제 WebView 복원 검사(`mvp-app/evidence/panels-final-20261019-231201/result.json`)에서 기존 메시지 6개·구버전 기록 4개 보존, 선택 세션 이름 표시, 제거한 표시의 부재, 입력창 높이, Agents 화면의 연결 상태, 협업 패널 읽기 전용·크기 조절을 확인했어. 격리된 DB 복사본을 사용했어.
+- 새 창 최대화 상태는 실행 파일을 격리된 DB로 띄운 뒤 Win32 `IsZoomed`로 확인했어(`mvp-app/evidence/window-default-20261019-231223/result.json`). 클릭 시 포커스 색상의 픽셀 비교는 하지 않았고 CSS와 프런트 빌드로 확인했어.
+
+## 창 가장자리 여백 제거 (2026-10-19)
+
+- 사용자가 표시한 창 안쪽 테두리 여백은 `v0-shell`에 넣어둔 `margin: 12px`, 줄어든 `width/height`, 둥근 테두리·그림자 때문에 생겼어. WebView 영역 전체를 채우도록 이 프레임 스타일을 제거했어. Windows 제목 표시줄은 그대로야.
+- `npm run build`와 동일 `esh-chat-mvp4.exe`의 `npm run build:desktop` 통과. `mvp-app/evidence/panels-final-20261019-225948/result.json`의 실제 WebView 복원 검사에서 기존 메시지 6개·구버전 기록 4개 보존, 패널 읽기 전용·크기 조절이 통과했어. 여백 값은 CSS에서 0으로 확인했고 픽셀 캡처 비교는 하지 않았어.
+
+## RECENT 프로젝트·세션 트리 스타일 (2026-10-19)
+
+- 사용자 이미지에 맞춰 프로젝트 행에 폴더 아이콘과 세션 수를 두고, 세션 아이콘 대신 세로 연결선과 텍스트 행을 적용했어. 선택 행은 어두운 배경과 둥근 오른쪽 모서리로 표시해. 프로젝트/세션 선택·검색·생성·Codex 기록 추가는 기존 React 상태와 Tauri command를 사용해. 프로젝트별 추가 버튼은 마우스를 올리거나 키보드 포커스가 있을 때 오른쪽에 아이콘으로 나타나며 세션 행을 밀지 않아.
+- `npm run build`와 동일 `esh-chat-mvp4.exe`의 `npm run build:desktop` 통과. 최종 `mvp-app/evidence/panels-final-20261019-225602/result.json`의 실제 WebView 복원 검사에서 기존 메시지 6개·구버전 기록 4개 보존, 패널 읽기 전용·크기 조절이 통과했어. DB는 검증용 복사본을 썼어. 화면 캡처는 다른 창이 가려 실제 ESH 픽셀 비교 근거로 사용하지 않았어.
+
+## 화면 확대·축소 단축키 (2026-10-19)
+
+- 메인 Tauri 창에서 WebView2 기본 `zoomHotkeysEnabled`를 켰어. Ctrl+`+`/`-`로 화면 전체를 확대·축소해. 화면 배율은 대화·세션 데이터와 분리돼 있어.
+- 현재 창 설정의 값과 설치된 Tauri CLI 스키마의 지원 필드를 확인했어. 동일 `esh-chat-mvp4.exe`의 `npm run build:desktop`이 통과했어. 실제 키 입력에 따른 배율 변화는 자동화로 관측하지 않았어.
+
+## 컨텍스트 원형 표시·상세 팝업 (2026-10-19)
+
+- 기존 컴포저 위 인라인 컨텍스트 카드를 전송 버튼 옆 원형 사용률 표시로 옮겼어. 원을 누르면 기존 실제 토큰 사용량·압축 상태·수동 압축 버튼을 팝업에서 보여. 바깥 클릭과 Esc로 닫고 세션 전환 시 팝업 상태를 초기화해.
+- 비율은 기존 `snapshot.contexts`의 `last.totalTokens / modelContextWindow`를 그대로 사용해. 한도가 없거나 값이 오래되면 `—`로 표시하며 가짜 수치를 만들지 않아. 압축 호출과 비활성 조건, Rust·SQLite·CLI 경로는 변경하지 않았어.
+- `npm run build`, `npm test`(Rust 15개), 동일 `esh-chat-mvp4.exe`의 `npm run build:desktop`이 통과했어. `mvp-app/evidence/compact-20261019-224151/result.json`에서 실제 WebView 팝업 열기, 실제 Codex `thread/compact/start` 1회, 압축 중→완료, item ID 일치, 같은 thread와 메시지 2개 보존을 확인했어. Mock AI 응답은 없고 보호 설정·인증·`technical-spike/` 해시도 유지됐어.
+- 앞선 `compact-20261019-223710`, `223822`, `223933`, `224039`는 GUI 검증 스크립트가 새 팝업을 생성 다이얼로그로 오인하거나 입력 대상을 잘못 잡아 중단된 실패 기록이야. 실패 증거를 보존했고, 생성 다이얼로그 선택자를 `.workspace-dialog`로 한정한 뒤 최종 검사가 통과했어. 이 검사는 실제 압축 경로를 확인한 것이며, 팝업의 모든 화면 크기나 모든 키보드 경로를 포괄하진 않아.
+
+## v0 ESH UI 통합 (2026-10-19)
+
+- 입력 자료: 사용자가 제공한 `collaborative-agent-ui-design.zip`과 배포 화면 `https://esh-alpha.vercel.app/`. ZIP은 단순한 초기 3패널 목업이고 배포 화면은 Connections 카드와 리뷰 목록 등 표시가 더 풍부해. 배포 화면의 시각 구성을 기준으로, ZIP의 컴포넌트 경계·색상·간격을 참고했어. ZIP의 하드코딩된 세션·에이전트·리뷰 데이터와 동작 시뮬레이션은 가져오지 않았어.
+- 이전 화면: 프로젝트 트리, 세션 목록, 대화 카드, 협업 메시지가 독립된 자체 CSS 패널에 모두 펼쳐졌어. 이후 화면: v0의 ESH Studio 탐색기, Codex Lead 대화와 컴포저, 리뷰 스레드 목록/선택 상세를 `main.tsx`의 기존 snapshot·command에 연결했어. 시각 스타일은 `src/v0.css`, SVG 아이콘은 `src/Icons.tsx`에 분리했어.
+- 실제 연결: 방/세션 생성·선택·검색, Codex 기록 copy/resume 추가, Codex/Arch 상태, main/collaboration 메시지, 리뷰 스레드 선택, 메시지 전송, 모델·추론 강도 저장, 실행 중단, 컨텍스트 사용량·수동 압축을 기존 경로로 사용해. 탐색기/협업 패널 접기와 너비 저장도 유지해. 오른쪽은 계속 읽기 전용이야.
+- v0의 Claude Code/Gemini CLI/OpenCode·가짜 세션·가짜 승인 기록은 제거했어. 파일 첨부는 현 MVP에 백엔드 경로가 없어서 비활성화하고 화면에 미지원이라고 표시해. v0의 Agents 메뉴는 현재 연결된 Codex/Antigravity 상태만 보여.
+- Rust 백엔드, SQLite schema 4, CLI 통신·Blocking Delegation·전달 기록은 변경하지 않았어. 실행 파일 이름과 앱 식별자도 유지했어.
+- 최종 `npm run build:desktop` 통과(같은 `esh-chat-mvp4.exe`). `npm test` 15개와 `node scripts/verify_external_threads.mjs` 통과. 첫 데스크톱 빌드는 사용자가 실행 중이던 exe 잠금으로 멈췄고, 사용자가 앱을 닫은 뒤 같은 이름으로 빌드했어.
+- 실제 Tauri/CLI 검증: `mvp-app/evidence/panels-20261019-222415/result.json`에서 Mock 없이 사용자 입력, Arch 첫·후속 검토, 같은 Codex 턴 재개, 호출별 wire 응답 1회, 대화/협업 분리, 재시작 복원이 통과했어. `mvp-app/evidence/import-ui-20261019-222352/result.json`에서 실제 Codex 목록과 추가 화면이 통과했어. 최종 문구·미응답 상태 표시까지 반영한 exe는 `mvp-app/evidence/panels-final-20261019-222856/result.json`에서 기존 메시지 6개·구버전 기록 4개 보존, 읽기 전용 패널과 크기 조절이 통과했어. 보호 설정과 `technical-spike/` 해시도 유지됐어.
+- 파일 첨부, 추가 에이전트 연결, 실제 검토 결과의 의미 반영 판정은 현재 MVP 범위 밖이야. 이번 UI 변경 후 수동 압축 완료 경로를 새로 실행하진 않았고, 기존 기능의 버튼 연결·Rust 단위 테스트·최종 빌드만 확인했어.
+
+## 수동 컨텍스트 압축 버튼 (2026-10-19)
+
+- 입력창 위 컨텍스트 상태에 **컨텍스트 압축** 버튼을 추가했어. 선택 세션에 threadId가 있고 실행 중이 아니며 전달 대기 메시지가 없을 때만 눌러.
+- worker 큐에 압축 job을 넣고, worker가 그 세션의 Codex 연결을 확보한 뒤 `thread/compact/start`를 호출해. 별도 프로세스로 같은 thread를 동시에 잡지 않아.
+- 완료 판정은 `contextCompaction` item의 started ID와 completed ID가 일치할 때만 해. 이어서 그 턴의 `turn/completed`를 최대 30초 기다려 다음 턴과 겹치지 않게 하고, 확인 못 하면 `compact_turn_close_unconfirmed`를 audit에 남겨. 완료 미확인은 `unknown`, 요청·실행 오류는 `failed`이며 자동 재시도는 없어.
+- Rust 테스트 15개 통과(`context::tests::manual_compact_requires_bound_thread_and_clears_previous_item` 추가). TypeScript/Vite 빌드 통과.
+- 실제 프로토콜 확인: `evidence/compact-probe-20261019/probe.json`. 설치본 Codex에서 새 검증 스레드를 만들고(모델 턴 없음) `thread/compact/start`를 호출했어. 응답 `{}`, 이어서 `turn/started` → `item/started(contextCompaction)` → `thread/tokenUsage/updated` → `item/completed(같은 item ID)` 순서를 실제로 받았어.
+- 데스크톱 빌드는 앱 종료 후 통과했어(`esh-chat-mvp4.exe`, 2026-10-19 18:54, 진단 코드 제거 상태).
+- 당시 자동화 환경에서는 WebView2가 초기화되지 않아 실제 GUI 완료 검증을 남겨뒀어. 이후 동일 mvp4 실행 파일의 `python scripts/verify_compact.py`가 통과했고, 새 팝업에서 실제 수동 압축 요청·item ID 일치·GUI 상태 전이·메시지 보존을 확인했어. 근거는 상단 `compact-20261019-224151/result.json`이야.
+
+
+## 컨텍스트 사용량·압축 상태 (동일 mvp4)
+
+- 입력창 위에 최근 보고 기준 컨텍스트 추정 비율/토큰과 압축 상태를 추가했어. 상세 정보에서 최근 입력·출력·캐시, 누적 토큰, 보고/압축 시각을 구분해. last.totalTokens를 분자로 사용하고, 한도 미제공·모델 변경·압축 후 갱신 전에는 비율을 만들지 않아.
+- 실제 thread/tokenUsage/updated와 contextCompaction 시작·완료를 처리해. 관측 전/압축 중/완료/실패/중단/확인 필요 상태와 완료 횟수를 저장해. 비정상 종료 시 미완료 압축은 unknown이며 자동 재개하지 않아. 사용자 메시지는 삭제하거나 요약으로 대체하지 않아.
+- SQLite schema 4의 session_context를 추가했어. 로컬 세션/thread 일치로 구분하고 재시작에 복원해. 구버전 DB 마이그레이션과 잘못된 수치 거부, 중복 완료·세션 분리·취소/재시작 불확실성 처리를 포함한 Rust 테스트 14개가 통과했어. TypeScript/Vite와 동일 mvp4 데스크톱 빌드도 통과했어.
+- `mvp-app/evidence/context-20261018-170755/result.json`, `stream`이 아닌 `contextUsage`를 담은 `context-gui.json`, `audit.json`, `restored-gui.json`에서 실제 사용량 이벤트 5개/자동 압축 완료 2회, 화면의 압축 중→완료, 최근 수치 일치, 미사용 세션 분리, 실제 Arch 응답 후 같은 thread/turn 재개와 도구 응답 wire write 1회, 재시작 기록/상태 복원이 통과했어. Mock 응답은 없어. 보호 설정·인증·technical-spike 해시도 유지됐어.
+- 실제 자동 압축 검증은 debug probe 전용 프로세스 override `model_auto_compact_token_limit=3000`을 사용했어. 일반 실행이나 사용자 설정 파일은 바꾸지 않았어. 기본 임계값까지 장문 대화를 늘린 스트레스 검증은 아니야. 수동 압축 버튼·임계값 설정·계정 한도 UI는 구현하지 않았어.
+- 최초 `context-20261018-170535`는 검증기가 숨겨진 안내의 “압축 완료 이벤트를 아직 관측하지 않았어”를 완료 상태로 오인해 실패했어. 실제 상태 속성으로 검사를 고쳤으며 최초 실패 증거는 보존했어.
+- 최종 빌드의 별도 복원 검사 `mvp-app/evidence/panels-final-20261018-170909/result.json`에서 기존 실제 대화 6개와 구버전 항목 4개, 읽기 전용 협업 패널/크기 조절을 확인했어. 원본 DB 대신 복사본을 마이그레이션했고 새 AI 턴을 실행하지 않았어.
+
+## Codex 실시간 답변 — 동일 mvp4 갱신 및 실제 검증 완료
+
+- `stream.rs`에서 공개 agentMessage delta를 같은 메시지 ID에 누적하고 약 40ms 간격으로 DB/UI를 갱신해. 완료 원문으로 확정하며 중복 완료 행을 방지해.
+- 작성 중/중단된 답변 표시, 부분 마크다운 렌더링, 같은 메시지 갱신 시 스크롤, 중단·종료 시 부분 답변 보존과 재시작 interrupted 처리를 구현했어. Arch는 기존 검증된 최종 리뷰 전달을 유지해.
+- 현재 코드의 Rust 단위 테스트 12개와 TypeScript/Vite 빌드가 통과했어. `scripts/verify_stream.py`에 실제 WebView의 완료 전 부분 응답 관찰, 중단 보존, 같은 연결/턴 Arch 후 재개, 도구 응답 1회, 재시작 복원 검사를 추가했어.
+- 최초 데스크톱 빌드는 실행 중인 exe 잠금(os error 5)으로 실패했고, 사용자 앱 종료 후 같은 `target/debug/esh-chat-mvp4.exe`에 빌드가 통과했어. 별도 버전 exe는 만들지 않았어.
+- `mvp-app/evidence/stream-20261018-165615/result.json`, `stream-gui.json`, `audit.json`, `restored-gui.json`에서 실제 CLI/WebView 검증이 통과했어. 실제 delta 934개와 최종 원문 일치, 완료 전 동일 메시지의 화면 갱신 143회, 최종 행 중복 없음, 중단된 부분 답변 보존, 같은 연결 유지, 실제 Arch 응답 후 같은 thread/turn 재개, 도구 응답 1회, 재시작 메시지 복원을 확인했어. Mock AI 응답은 없으며 보호 설정·인증 및 technical-spike 해시가 유지됐어.
+- 강제 종료 직전 저장되지 않은 최대 약 40ms의 버퍼는 유실될 수 있어. 정상 중단에서는 남은 버퍼를 저장해.
+
+## 실행 중단 버튼
+
+- 현재 선택한 세션의 실행이 있을 때 입력창에 중단 버튼을 표시해. 실행 ID를 대조해 오래된 버튼 요청을 거부하고 중단 중 중복 클릭/같은 세션 전송을 막아.
+- Codex는 turn/interrupt와 실제 interrupted 종료 event로 중단을 확인해. Arch 실행 중에는 프로세스 종료 → 열린 도구에 취소 결과 1회 전달 → Codex 중단 순서를 사용해. 정상 중단 후 앱·연결·thread와 기록을 유지해.
+- 같은 세션의 기존 queued 입력은 cancelled로 보존하고 다음 공유 맥락에서 제외해. 다른 세션 입력과 중단 완료 후 새 입력은 유지해.
+- TypeScript/Vite와 Rust 테스트 10개가 통과했어. `mvp-app/evidence/cancel-20261018-163622/result.json`에서 실제 GUI 버튼으로 Codex 생성 중단, Arch 실행 중단과 PID 종료 확인, 열린 도구 취소 응답 1회, 같은 Codex 연결/thread에서 새 요청 2회 복구, queued 입력 취소/미실행, 오래된 runId 거부, 재시작 기록 복원이 통과했어. Mock 응답은 사용하지 않았고 보호 설정·인증·spike 해시도 유지됐어.
+- 첫 실제 검사 `cancel-20261018-163431`은 turn/start 응답 뒤 실제 turn/started 전 interrupt가 거절되는 경합으로 unknown 처리됐어. 실패는 보존하고 실제 시작 이벤트 수신 후 interrupt 재요청으로 보완했어.
+- 정상 2회 Arch 리뷰/동일 턴 재개는 `panels-20261018-163711`의 실제 CLI/GUI 증거에서 확인됐어. 해당 전체 스크립트는 마지막 legacy migration 화면이 공용 WebView의 빈 세션 선택을 따라가 실패했으므로 전체 통과로 집계하지 않아. 동일하게 restore-history를 사용하도록 스크립트를 보완했어. 정상 리뷰 부분만 재검사한 범위 제한 결과는 `cancel-normal-20261018-163930/result.json`에 있어(새 AI 호출 없음).
+- 최종 빌드의 별도 복원 회귀 `panels-final-20261018-163830/result.json`에서 기존 대화 6개/구버전 항목 4개 보존과 세션 전환·패널 동작이 통과했어. 결과 경로는 모두 mvp-app/evidence 기준이야. 중단 확인 실패 분기와 실행 중 강제 종료의 모든 경합을 실제로 검증했다는 뜻은 아니야.
+
+## AI 메시지 마크다운 렌더링
+
+- react-markdown + remark-gfm을 추가해 중앙 Codex 답변과 오른쪽 AI 협업 메시지에 제목·강조·목록·인용·표·취소선·코드 블록·읽기 전용 체크리스트를 표시해. 사용자 메시지와 DB 원문은 유지해.
+- HTML 실행은 허용하지 않아. http/https 링크만 활성화하고 외부 이미지는 alt 텍스트로 대체해. 긴 코드·표에는 가로 스크롤을 적용해. 문법 색상 강조·수식·Mermaid는 이번 범위가 아니야.
+- TypeScript/Vite 빌드와 SSR 구조·안전성 검사가 통과했어. 동일 mvp4 데스크톱 빌드와 실제 WebView 검사도 통과했어. `mvp-app/evidence/markdown-20261018-161152/result.json`에서 렌더링 구조, 읽기 전용 체크리스트, 사용자 원문, HTML·위험 URL·외부 이미지 차단, 코드 가로 스크롤과 카드 넘침 방지를 확인했어. 이 검사는 합성 렌더링 fixture이며 실제 AI 응답 성공으로 집계하지 않아. `panels-final-20261018-161130/result.json`에는 기존 실제 대화 6개 복원과 구버전 항목 4개 보존·패널 동작 통과 기록이 있어. 최초 fixture 검사(161127)는 사용자 본문이 아닌 발화자 이름의 strong까지 검사해 실패했으며 본문으로 범위를 바로잡았고 실패 증거는 보존했어.
+
+## 모델·추론 강도 선택 추가 (동일 mvp4 실행 파일 갱신)
+
+- 입력창 안에 Codex 모델과 추론 강도 선택을 추가했어. 실제 `model/list`가 반환하는 모델·지원 강도만 표시하고, 모델 변경 시 해당 모델의 기본 강도를 저장해.
+- 세션별 SQLite 설정 저장(schema 3), 세션 전환/재시작 복원, 다음 턴 적용, 지원하지 않는 조합 거부, 목록 실패/재조회 UI를 구현했어. 대기 중인 입력에는 전송 당시 설정을 고정해.
+- 실행 중인 Arch 검토와 열린 Codex 호출은 그대로 유지해. Antigravity 모델 설정은 이번 범위가 아니야. 기존 미설정 세션은 기존 모델·낮음 추론을 사용하는 호환 동작을 유지해.
+- 새 debug GUI 검증 thread에 threadSource=esh-verification을 부여해 실제 사용자 목록에서 검증 기록이 다시 섞이는 것을 줄였어.
+- 빌드/타입 검사와 Rust 단위 테스트 9개가 통과했어. `scripts/verify_models.py`의 실제 CLI/WebView 검증 근거는 `mvp-app/evidence/models-20261018-160229/result.json`, `audit.json`, `models-gui.json`, `restored-gui.json`이야.
+- 실제 Codex 0.163.0-alpha.10.2, agy 1.4.0에서 GPT-6.1 Sol/low → GPT-6 Luna/medium으로 같은 thread를 유지하며 변경했고, 두 번째 턴의 실제 Arch 검토 뒤 같은 turn 재개/도구 응답 1회를 확인했어. GUI 세션별 복구, 잘못된 설정 차단, 없는 Codex exe로 목록 오류 표시도 통과했어. 설정·인증·technical-spike 보호 파일 해시가 유지됐어.
+
+추가 회귀 확인: `evidence/panels-final-20261018-160453/result.json`에서 최종 빌드의 구버전 대화 6개 복원, 기존 항목 4개 보존, 세션 전환·패널 읽기 전용/크기 조절이 통과했어. 앞선 `panels-final-20261018-160403`의 실패는 공용 WebView가 다른 검증 DB의 빈 기본 세션 선택을 기억해서 검사 대상이 달라진 경우였어. restore-history 검증 모드에서 기록이 있는 세션을 명시적으로 선택하도록 검사 경로를 보완했고, 일반 사용자의 선택 복원 동작은 바꾸지 않았어. 실패 증거도 보존했어. 목록 분류 회귀 검사도 통과했어.
+
+## 실행 파일 정리와 후속 빌드 규칙
+
+사용자의 최신 요청에 따라 `target/debug`의 `esh-chat.exe`, `esh-chat-mvp1.exe`, `esh-chat-mvp2.exe`, `esh-chat-mvp3.exe`를 삭제했고 `esh-chat-mvp4.exe` 하나만 남겼어. 삭제 전후 mvp4 SHA-256이 동일한지 확인했어. 소스·DB·검증 증거는 삭제하지 않았어.
+
+앞으로는 이름을 올리지 않고 `esh-chat-mvp4.exe`를 같은 경로에 갱신해. 빌드 대상과 스크립트는 이미 이 이름을 사용하므로 코드 변경이나 재빌드는 하지 않았어. 실행 중 잠기면 사용자에게 앱을 닫도록 안내하고 별도 이름의 실행 파일을 만들지 않아.
+
+## 빌드 전 .d / .pdb 정리
+
+`scripts/build.ps1`은 데스크톱 빌드 전에 `target/debug` 바로 아래의 `esh-chat*.d`, `esh_chat*.pdb`를 제거해. 의존성 캐시 하위 디렉터리, exe, 소스, DB, 검증 증거는 건드리지 않아. 빌드 후 새로 생성된 파일은 다음 빌드 때 정리해.
+
+PowerShell 구문 검사와 실제 스크립트의 정리 구간 실행을 확인했고, 기존 `.d`/`.pdb` 6개를 삭제했어. mvp4 exe SHA-256은 동일해. 이 변경은 빌드 전처리라 앱 재빌드나 CLI 검증은 실행하지 않았어.
+
+## mvp4 — 중복 프로젝트·룸 선택 행 제거
+
+- 프로젝트 제목 밑에 반복 표시되던 룸 버튼을 제거했어. 제목에 룸 선택, 세션 개수, 펼치기·접기 표시를 합쳤어.
+- 같은 프로젝트를 접고 펼칠 때 현재 세션을 유지해. 다른 프로젝트 제목을 누르면 그 룸의 첫 세션(없으면 빈 룸 화면)을 선택해.
+- 새 세션/Codex 추가 버튼과 개별 세션 선택, CLI·SQLite 처리는 유지했어. 실행 파일은 `esh-chat-mvp4`야. TypeScript/Vite·데스크톱 빌드 통과. 실제 WebView 복원/세션 전환/패널 검사(`evidence/panels-final-20261018-154917/result.json`)와 실제 Codex 목록·추가 화면 검사(`evidence/import-ui-20261018-154920/result.json`)가 통과했어. 두 증거 경로는 `mvp-app/` 기준이고 새 모델 턴은 실행하지 않았어.
+
+## mvp3 — ESH 콘솔 창 숨김
+
+- `main.rs`의 Windows GUI 서브시스템 설정을 release 전용에서 Windows의 모든 빌드로 변경했어. 배포 중인 debug exe 자체가 콘솔 창을 만들던 원인이야.
+- Codex·Arch 자식 프로세스는 기존 CREATE_NO_WINDOW 설정을 유지해. stdio 통신, 프로세스 종료 관리, SQLite 경로는 변경하지 않았어.
+- 실행 파일과 빌드·검증 명령을 `esh-chat-mvp3`로 맞췄어. TypeScript/Vite·데스크톱 빌드 통과. 실제 PE 헤더에서 mvp2는 console(3), mvp3는 Windows GUI(2)임을 확인했어. `mvp-app/evidence/panels-final-20261018-154608/result.json`에서 실제 창의 대화 복원·기록 보존·패널 동작·정상 종료 검사가 통과했어. 새 AI 호출은 실행하지 않았어.
+
+## mvp2 — 탐색기 가독성 임시 개선
+
+- 프로젝트 제목 14px, 세션 제목 13px, 세션 부가 정보 11px로 키웠어.
+- 탐색기 보조 글자 대비, 프로젝트 사이 구분선과 간격, 세션 선택 배경·청록색 표시를 강화했어.
+- 세션 추가/가져오기 버튼을 키우고 좁은 패널에서 줄바꿈하도록 했어. 긴 세션 제목은 두 줄로 제한해.
+- 메시지·에이전트·SQLite·CLI 처리 코드는 변경하지 않았어. 모델·추론 설정은 여전히 미구현이야.
+- 실행 대상·빌드·검증 스크립트 이름을 `esh-chat-mvp2`로 맞췄어. TypeScript/Vite와 데스크톱 빌드가 통과했어. `mvp-app/evidence/panels-final-20261018-045121/result.json`에서 실제 WebView의 기존 대화 6개 복원, 구버전 항목 4개 보존, 세션 전환, 패널 읽기 전용/크기 조절이 통과했어. 새 AI 턴은 실행하지 않았어. 보조 글자와 탐색기 배경의 계산상 대비는 약 8.99:1이야.
+
+## 확인 방법과 근거 범위
+
+`mvp-app/src/`, `src-tauri/src/`, Cargo/npm/Tauri 설정, 빌드·검증 스크립트와 실제 저장된 result/audit/WebView 증거를 확인했어. 아래의 “통과”는 해당 기록 시점과 실행 범위에 한정돼. 오래된 결과를 최신 전체 앱의 재검증으로 간주하지 마.
+
+이번 문서 작업에서 다시 실행한 검사:
+
+| 검사 | 결과 | 범위 |
+|---|---|---|
+| `npm test` | 7 passed, 0 failed | 현재 Rust 단위 테스트. 실제 AI 모델 호출 없음 |
+| `node scripts/verify_external_threads.mjs` | passed | 실제 저장 응답 27개, 테스트 경로 기록 9개 분류 및 일반 대화 보존·제목 처리. 경계 사례용 합성 입력도 포함 |
+
+Rust 7개 검사는 timeout 설정 범위, 오래되거나 빈 Arch 구조화 결과 거부, 채널·call 연결, 재시작 상태 처리와 중복 예약 차단, legacy migration, 세션별 맥락·버전 분리, copy/resume 저장 의미를 검사해. CLI 통신·OS 강제 종료·모델의 의미적 요구사항 반영을 이 단위 테스트가 증명하진 않아.
+
+이번 작업에서는 프런트/데스크톱 빌드나 실제 AI 협업을 새로 실행하지 않았어. 아래는 기존 증거를 읽어 확인한 결과야. 경로 기준은 `mvp-app/`이야.
+
+| 증거 | 실제 확인된 내용 |
+|---|---|
+| `../technical-spike/VERIFIED.json` | Codex Dynamic Tool 약 12초 대기, 호출 응답 wire write 1회·완료 event 1회, 같은 thread 후속 대화. 별도 agy 2턴 세션 재개 성공. 둘을 결합한 GUI 검증은 아님 |
+| `evidence/gui-20261018-032922/result.json` | 초기 실제 GUI/CLI 연결, 같은 Codex thread/turn 복귀, Arch 결과 1회 전달, 메시지/상태 재시작 복구, 연결 오류 표시 |
+| `evidence/panels-20261018-035628/result.json` | 실제 Arch 검토 2회(후속 포함), 같은 Codex thread/turn, 호출별 응답 1회, 중앙 2개/협업 4개 메시지 분리, 오른쪽 읽기 전용·패널 크기 조절, 구버전 기록 보존, 재시작·연결 오류 |
+| `evidence/workspace-20261018-041248/result.json` | 실제 룸·세션 생성, A/B 맥락 분리, A 재개, 원본 목록 조회·copy·resume, copy의 실제 Arch 검토, 도구 응답 1회, 룸·세션·메시지 복원 |
+| `evidence/panels-final-20261018-041522/result.json` | 당시 최종 빌드에서 저장된 실제 대화/구버전 DB 복사본 복원. AI를 새로 실행한 검사는 아님 |
+| `evidence/import-ui-20261018-042551/result.json` | mvp1 이름 변경 뒤 실제 CLI 목록 + WebView 검사. 해당 페이지의 자동 실행/검증 항목 13개 기본 숨김·체크 시 표시, 검색 버튼 56px, 선택 후 이름·추가 버튼 정상. 새 모델 턴 실행 없음 |
+
+검증 폴더의 `*-gui.json`과 `audit.json`/DB에 상세 근거가 있어. 각 result에는 확인 대상 설정·인증 및 spike 원본 변경 없음도 기록돼 있어. 이 해시 검사는 지정한 파일 목록에 대한 것이며 컴퓨터 전체 파일 불변 검증은 아니야.
+
+`evidence/gui-20261018-032444/`, `evidence/workspace-20261018-041153/`에는 `passed=false`가 있어. 실패 기록은 그대로 보존하며 통과 건수에 포함하지 않아. 후자는 구버전 실행 파일 사용으로 probe 모드가 맞지 않았던 이력이야(`WORKSPACE_VERIFICATION.md`와 해당 GUI 실패 기록 참고).
+
+## 완료된 구현
+
+### 대화·협업
+
+- Tauri 2 + React 화면에서 실제 Codex/Antigravity CLI 결과를 표시해. 운영용 Mock 응답 경로는 없어.
+- Codex Lead가 Dynamic Tool로 Arch 검토를 요청하고 응답을 기다려. Arch 종료 뒤 같은 도구 호출에 결과를 반환해 Codex가 같은 턴에서 이어 답해.
+- 리뷰 요청·후속 요청·Arch 응답은 callId로 연결된 오른쪽 읽기 전용 타임라인에 표시해. 중앙은 사용자와 Codex 답변이야.
+- 사용자 메시지는 SQLite에 즉시 저장해. 검토 중 메시지도 받으며 같은 로컬 세션의 대기 요구사항을 리뷰와 분리해 전달하는 코드가 있어. **이 경합 시나리오의 실제 통합 검증은 아래 미완료 항목이야.**
+- 오류·CLI 시작 실패는 GUI 오류로 표시해. Arch 실패는 성공 리뷰로 대체하지 않고 `success=false`로 Codex에 반환해.
+- 기본 120초/설정 30~600초, Arch 자동 재시도 없음, 리뷰 ID/버전/결과 검사, 턴당 Arch 실행 최대 3회가 구현돼.
+
+### 탐색기·저장
+
+- 프로젝트·룸 생성, 룸 안의 세션 생성·선택, 세션별 맥락/버전 분리, 앱 전체 직렬 실행 큐가 있어.
+- 기존 Codex 세션의 로컬 목록·검색·추가 페이지 조회, 공개 텍스트 copy, 원본 thread resume을 제공해.
+- 이름 없는 ESH 세션의 내부 전달 문구를 목록 제목에서 정리해. 자동 실행·검증 기록은 기본 숨김/체크 시 표시해.
+- 세션 선택 시 이름 자동 입력, 검색 결과 초기화·오래된 조회 응답 무시, 검색 버튼 줄바꿈 수정이 들어 있어.
+- SQLite schema 4와 legacy migration, 메시지 순서·생성 시간·발화자·채널·식별자·상태 저장 및 복구가 있어.
+- 창 종료 정리와 재시작 시 미완료 실행 unknown/queued 입력 interrupted 처리가 있어. 열린 RPC를 자동 재개하지 않아.
+- 3패널 드래그·키보드 크기 조절, 선택 세션·패널 너비 복구를 제공해.
+
+## 미완성·미구현
+
+| 항목 | 현재 정확한 상태 |
+|---|---|
+| Arch 모델 선택 | Codex 모델·추론 선택은 구현 완료. Arch는 `gemini-3.8-flash-high` 고정이며 별도 선택 UI 없음 |
+| 컨텍스트 확장 | 사용량·압축 상태 표시/SQLite 저장과 수동 압축 버튼 구현. 임계값 설정 UI·압축 실패 복구 UX는 없음. GUI 검증 범위는 상단 후속 기록 참조 |
+| 중단 범위 확장 | 현재 실행 중단 버튼은 구현. 개별 queued 항목 취소·작업별 영속 상태 이력은 없음 |
+| 개발 작업 | 작업 폴더 연결, 파일 탐색·수정, 터미널 실행, 승인 UI, diff, Git/worktree 관리 없음 |
+| Arch 지속 세션 | spike에서는 resume 검증, 실제 앱에서는 리뷰마다 새 agy 프로세스/대화 실행 |
+| 추가 에이전트 | QA 에이전트·역할 편집·임의 provider 추가 없음 |
+| 사용자 메시지 의미 반영 확인 | queued/delivered/interrupted만 사용. 별도 applied 상태나 의미적 확인 없음 |
+| 다중 작업 실행 | 전체 worker 하나. 세션별 병렬 실행·job 상태 이력·영속 실행 큐 없음 |
+| 외부 세션 동기화 | 가져온 시점의 공개 텍스트만 복사. 외부 앱의 새 발언 실시간 동기화 없음 |
+| 룸·세션 관리 확장 | 생성·조회·선택·가져오기만 있음. 이름 변경·삭제·이동·내보내기 없음 |
+| 출력 UI | Codex 공개 답변 스트리밍·부분 답변 보존 구현. Arch는 검증된 완료 결과 표시. 첨부 업로드 없음. AI 메시지 Markdown 렌더링 구현 |
+| 배포 | debug exe 빌드와 로컬 실행. bundle 비활성화, 설치 프로그램·자동 업데이트 없음 |
+| 상태 관리 라이브러리·에디터 | Zustand, shadcn/ui, xterm.js, Monaco 미도입 |
+
+## 알려진 제한·코드에서 확인한 개선 필요 사항
+
+재현된 과거 UI 문제와 현재 남은 위험을 구분했어. 아래 코드상 위험은 모두 실제 장애를 재현했다는 뜻이 아니야.
+
+1. **검증 기록 분류는 아직 한정적이야.** 이전 3개만 숨겨 다른 테스트 기록이 보이던 문제는 실행 방식·경로 분류로 보완했고 mvp1 GUI 검사 통과했어. 하지만 현재도 특정 기존 ID 3개와 특정 테스트 경로를 포함한 규칙이야. 향후 모든 테스트를 식별하는 provenance 체계는 없어. 페이지 전체가 숨김 대상이면 목록이 비어 보여도 “더 불러오기”로 다음 페이지를 읽어야 해.
+2. **같은 원본을 동시에 쓰는 문제를 막는 전역 잠금이 없어.** 가져오기 시 active 확인만 해. 다른 프로세스가 그 뒤 원본을 쓰거나 앱 두 개가 같은 ESH DB를 열면 상태 복구/쓰기 경합이 생길 수 있어. 실행 파일 이름이 달라도 앱 identifier와 DB는 같아.
+3. **컨텍스트가 중복될 수 있어.** `engine.rs`는 매 turn 현재 사용자 요청과 최근 60개 메시지를 다시 보내. 최근 60개는 “원하는 모든 과거 대화를 의미적으로 보존하는 요약”이 아니야. Codex 원래 이력과 중복되고 긴 대화 비용·압축 결과에 영향을 줄 수 있어.
+4. **전달과 요구사항 반영의 경계가 남아 있어.** 최신 사용자 메시지 우선은 구조와 프롬프트로 지시하며 실제 준수를 프로그램이 검증하지 않아. pending 수집과 도구 응답 전송 사이에 들어온 메시지는 다음 턴 큐에 남을 수 있어. 검토 중에는 모두 같은 턴에 반영된다고 단정하지 마.
+5. **종료 가드는 메시지 전송에 집중돼 있어.** `submit`은 accepting을 검사하지만 룸/세션 생성·외부 목록/가져오기 command에는 같은 검사가 없어. 별도 단기 RPC는 worker가 소유하지 않아 종료 경합 검증이 필요해. 원본 가져오기는 단기 RPC close 오류를 무시하는 코드도 있어.
+6. **오류 정리와 상태 표시의 경합이 있어.** 이전 세션 RPC close 실패는 새 입력의 execution_session 설정 전 발생할 수 있어 오류가 이전 세션에 기록될 위험이 있어. 글로벌 agents 상태라 다른 세션을 선택해도 실행 중인 세션의 상태가 표시돼. Arch 종료확인 실패 후 최종 상태가 적절히 unknown인지도 경로별 재검증이 필요해.
+7. **도구 전달은 장애 후 exactly-once가 아니야.** 예약 뒤 전송 중 죽으면 실제 수신 여부를 알 수 없어. unknown으로 남기고 자동 재전송하지 않는 현재 한계를 유지해.
+8. **Arch 도구 사용 차단은 완전한 샌드박스가 아니야.** plan 모드·금지 프롬프트가 있으며 CLI 도구 자체가 비활성화됐다고 보장하지 않아. 개발 기능 확대 전에 실제 권한 경계를 검토해야 해.
+9. **로그 보존·크기 정책이 없어.** `audit`에 전체 프로토콜/내용/stderr가 쌓이고 snapshot도 전체 메시지를 전달해. 장시간 사용의 DB 크기·성능·민감 정보 로그 취급 정책이 필요해.
+10. **수동 압축은 중단·재시도 경로가 없어.** 압축 job은 실행 중인 턴이 없을 때만 시작하고, 진행 중에는 전용 취소 버튼이 없어. 압축 턴 ID를 `Rpc.turn_id`로 추적하지 않으므로 앱 종료·강제 종료 시 진행 중 압축은 `unknown`으로 남고 자동 재개하지 않아. 완료 이벤트를 180초 안에 확인하지 못해도 `unknown`이야.
+
+## 추가 검증이 필요한 조건
+
+다음은 코드 경로가 있거나 설계 요구사항이지만, 확인한 result만으로 실제 앱 검증 완료라고 할 수 없어.
+
+- 실제 Arch 제한 시간 초과와 무한 대기 방지, Codex 실패 응답 후 재개.
+- 검토 도중 새 사용자 요구사항 주입 → 오래된 리뷰 표시 → 같은 세션 최신 요구 우선 답변의 통합 시나리오.
+- Arch 실행 중 창 닫기, 프로세스 종료 확인 실패, 도구 응답 전송 도중 강제 종료와 재시작.
+- 실제 인증 만료·권한 실패의 GUI 표시. 기존 오류 GUI 검사는 존재하지 않는 agy 경로를 사용했어.
+- 기본 임계값에서 장문 대화 자동 압축 스트레스 검증. 낮은 프로세스 전용 임계값에서 실제 자동 압축 상태 관측은 상단 검증 기록 참조. 모델·추론 선택 및 세션별 복원/같은 thread 적용도 검증 기록 참조.
+- 원본 세션에 Arch 도구가 없는 경우의 실제 안내, 외부 앱 동시 사용/연속 가져오기 경합.
+
+## 다음 작업 제안 — 아직 구현하지 않음
+
+1. **대화 안정성 보강:** 중단 버튼은 구현했어. 남은 통합 검증 공백을 메우고, 종료/큐/원본 동시 사용의 실패 재현과 상태 처리를 정리해.
+2. **다음 기능 후보(미구현):** 압축 실패·unknown 복구 UX와 재시도 안내. 수동 압축 버튼, 사용량·압축 상태 표시, 모델 목록·추론 선택과 세션별 저장은 구현했어. 새로운 API 연결은 당시 설치 프로토콜로 다시 확인해.
+3. **기능에 맞춘 UI 정리:** 기존 탐색기·중앙 대화·오른쪽 협업 구분을 유지하며 설정 위치, 실행 대상 세션·오류·중단 표시를 정돈해.
+4. **개발 도구 확장:** 실제 작업 폴더, 권한·승인, 프로세스 관리가 정해진 뒤 파일 수정·터미널·diff·Git worktree를 단계적으로 추가해.
+
+Codex Desktop과의 기능 동등성이나 출시 일정은 확정하지 않았어. 현재 검증된 대화 MVP에서 확장하는 순서이며, 공개 프로토콜 지원과 추가 구현이 필요한 범위를 구분해야 해.
+
+## 다음 개발자가 실행할 명령
+
+`mvp-app/`에서 실행해.
+
+```powershell
+npm test
+node scripts/verify_external_threads.mjs
+npm run build:desktop
+python scripts/verify_import_ui.py
+python scripts/verify_models.py
+python scripts/verify_cancel.py
+python scripts/verify_stream.py
+python scripts/verify_context.py
+python scripts/verify_live.py
+python scripts/verify_workspace.py
+python scripts/verify_restore.py
+```
+
+이 명령들을 매번 전부 실행할 필요는 없어. 첫 두 개는 로컬 검사, 실제 CLI를 사용하는 GUI 검사는 사용량과 저장소 부작용을 고려해 변경 범위에 맞춰 골라. `verify_restore.py`는 기존 실제 대화 DB 복사본을 사용해 새 모델 턴 없이 복원을 검사해. GUI probe는 debug 빌드 + `ESH_GUI_PROBE`가 있을 때만 동작해.
+
+과거 `README.md`, `VERIFICATION.md`, `PANEL_VERIFICATION.md`, `WORKSPACE_VERIFICATION.md`, `IMPORT_UI_FIX.md`에는 당시 빌드명과 검증 단계가 남아 있어. 현재 실행 대상은 Cargo/빌드 스크립트의 `esh-chat-mvp4`를 기준으로 하고, 과거 문서의 next/fixed/ui exe를 최신본으로 안내하지 마.
