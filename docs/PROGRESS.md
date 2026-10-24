@@ -1,5 +1,17 @@
 # ESH 진행 상태와 개발 인계
 
+## OpenCode 세션 모델 선택 (2026-10-25)
+
+- `mvp-app/src-tauri/src/opencode.rs`에서 등록된 CLI의 `models --pure` 출력을 제한 시간과 크기 검사를 두고 읽어 `provider/model` 및 `nvidia/deepseek-ai/deepseek-r1` 같은 멀티 슬래시 ID를 표시해. 빈 세그먼트·공백·제어 문자가 있는 ID는 거부해. `mvp-app/src/main.tsx`는 목록 조회 실패를 표시하고 다시 조회할 수 있으며, 저장 모델의 목록 누락은 해당 세션의 조회가 완료된 뒤에만 보여줘.
+- `mvp-app/src-tauri/src/engine.rs`는 선택 시 CLI 모델 목록과 대조한 뒤 기존 `chat_sessions.model`에 세션별로 저장해. 실행할 때는 목록을 다시 조회하지 않고 선택한 모델에만 `run --model`을 전달해. CLI가 모델을 거부하거나 제공자 연결에 실패하면 실행 오류로 처리해. 미선택 세션은 `--model`을 생략해 OpenCode 기본 동작을 따르며, Codex 모델·추론 강도 경로는 유지해. 새 DB 마이그레이션은 없어.
+- 이번 수정 검증: `mvp-app/src-tauri/src/opencode.rs`의 실제 출력 사례 기반 파싱·부정 입력 테스트를 포함해 `npm test` 46개 통과, `npm run build`와 수정 후 `npm run build:desktop` 통과. 격리된 ESH WebView에서 `openrouter/cohere/north-mini-code:free`를 선택해 세션별 DB 저장을 확인했고, 선택 모델로 보낸 요청에 실제 `OK` 답변을 받았어.
+
+## OpenCode Lead 연결 구현 (2026-10-25)
+
+- 등록된 npm OpenCode CLI를 Lead로 활성화하고 새 세션에서 선택할 수 있게 연결했어. JSON 답변의 세션 ID를 SQLite에 저장해 다음 턴에서 이어 쓰며, 중단·시간 초과·오류를 기존 단일 worker 경로로 처리해. 기존 Codex 세션은 Codex로 유지해.
+- SQLite 스키마를 v6으로 올렸어. 기존 세션은 Codex로 보존하고, 기존 OpenCode npm CLI 등록은 경로가 일치할 때 실행 연결로 마이그레이션해. 데이터 보존을 포함한 Rust 테스트 44개, 프런트 빌드, 같은 이름의 데스크톱 EXE 빌드가 통과했어.
+- 실제 ESH WebView에서 격리 DB를 사용해 npm OpenCode CLI를 등록하고, 새 Lead 세션에서 첫 요청과 이어쓰기 요청에 각각 `OK` 답변을 받았어. SQLite에 동일한 외부 세션 ID와 네 메시지의 `delivered` 상태가 저장됐고, 앱을 닫았다 다시 열어 두 답변이 화면에 복원되는 것도 확인했어. 테스트용 DB는 사용자 기본 DB와 분리했어. 테스트 창을 여는 도구 환경에서는 `USERPROFILE`이 없어 Codex 모델 목록 조회 오류가 따로 표시됐지만 OpenCode 두 턴은 성공했어.
+
 ## 등록 역할과 활성 역할 구분 (2026-10-24)
 
 - 기존 SQLite `agent_instances.role`은 희망 역할로 그대로 읽고 저장해. `list_agent_instances`의 응답에 계산된 `activeRole`을 추가했어. builtin 인스턴스의 ID·연결 방식·역할·capability가 실제 등록 Adapter와 모두 맞을 때만 `lead` 또는 `reviewer`를 반환하고, 실행 어댑터가 없는 사용자 등록은 `null`이야. DB 스키마·사용자 기록·worker·Blocking Delegation은 변경하지 않았어.

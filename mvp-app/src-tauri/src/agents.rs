@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 pub type AgentFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + Send + 'a>>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ConnectionKind { AppServerStdioJsonRpc, AgyCliStreamJson, #[cfg(test)] MockInProcess }
+pub enum ConnectionKind { AppServerStdioJsonRpc, AgyCliStreamJson, OpenCodeCliJson, #[cfg(test)] MockInProcess }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AgentRole { Lead, Reviewer }
@@ -91,6 +91,12 @@ fn inspect_codex_bin(root: &Path) -> (Installation, Option<String>) {
 }
 
 fn probe_install(id: &str) -> (Installation, Option<String>) {
+    if id == "opencode" {
+        let Some(appdata) = std::env::var_os("APPDATA") else {
+            return (Installation::Unknown, Some("APPDATA를 확인할 수 없습니다".into()));
+        };
+        return inspect_file(&PathBuf::from(appdata).join("npm/node_modules/opencode-ai/bin/opencode.exe"));
+    }
     let variable = if id == "codex" { "ESH_CODEX_BIN" } else { "ESH_AGY_BIN" };
     if let Some(path) = std::env::var_os(variable) {
         return inspect_file(&PathBuf::from(path));
@@ -116,6 +122,7 @@ fn probe_adapter(descriptor: AgentDescriptor) -> AgentProbe {
         connection: match descriptor.connection {
             ConnectionKind::AppServerStdioJsonRpc => "App Server · stdio JSON-RPC",
             ConnectionKind::AgyCliStreamJson => "agy CLI · stream-json",
+            ConnectionKind::OpenCodeCliJson => "OpenCode CLI · JSON",
             #[cfg(test)] ConnectionKind::MockInProcess => "Mock · in-process",
         },
         installation,
@@ -152,10 +159,23 @@ pub trait ReviewAdapter: AgentAdapter {
 
 pub struct CodexAdapter;
 pub struct AntigravityAdapter;
+pub struct OpenCodeAdapter;
 pub const CODEX: CodexAdapter = CodexAdapter;
 pub const ANTIGRAVITY: AntigravityAdapter = AntigravityAdapter;
+pub const OPENCODE: OpenCodeAdapter = OpenCodeAdapter;
 
-pub fn registered() -> [&'static dyn AgentAdapter; 2] { [&CODEX, &ANTIGRAVITY] }
+pub fn registered() -> [&'static dyn AgentAdapter; 3] { [&CODEX, &ANTIGRAVITY, &OPENCODE] }
+
+impl AgentAdapter for OpenCodeAdapter {
+    fn descriptor(&self) -> AgentDescriptor {
+        AgentDescriptor { id: "opencode", display_name: "OpenCode", connection: ConnectionKind::OpenCodeCliJson,
+            roles: &[AgentRole::Lead],
+            capabilities: AgentCapabilities { lead_conversation: true, delegated_review: false,
+                persistent_session: true, streaming: false, cancellation: true, model_catalog: false,
+                context_compaction: false, tool_call_bridge: false },
+        }
+    }
+}
 
 #[cfg(test)]
 pub(crate) fn registered_with_mock(mock: &dyn AgentAdapter) -> Vec<&dyn AgentAdapter> {

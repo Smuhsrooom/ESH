@@ -73,7 +73,7 @@ fn review_records_and_tool_delivery_survive_restart_without_replaying_open_call(
     let state: String = db.query_row("SELECT state FROM tool_deliveries WHERE call_key=?1", ["connection:thread:turn:call"], |r| r.get(0)).unwrap();
     assert_eq!(state, "unknown");
     let schema: i64 = db.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-    assert_eq!(schema, 5);
+    assert_eq!(schema, 6);
 }
 
 #[test]

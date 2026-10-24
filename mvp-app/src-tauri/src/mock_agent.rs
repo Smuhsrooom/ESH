@@ -144,12 +144,12 @@ mod tests {
         let (_dir, store) = store();
         let mock = MockAgent::new(ReviewOutcome::Success);
         let production = registered();
-        assert_eq!(production.len(), 2);
+        assert_eq!(production.len(), 3);
         assert!(!production.iter().any(|adapter| adapter.descriptor().id == "mock_agent"));
         assert!(!store.list_agent_instances().unwrap().iter().any(|i| i.provider == "mock_agent"));
         let test_registry = registered_with_mock(&mock);
-        assert_eq!(test_registry[2].descriptor().connection, ConnectionKind::MockInProcess);
-        assert_eq!(test_registry[2].descriptor().roles, [AgentRole::Lead, AgentRole::Reviewer]);
+        assert_eq!(test_registry[3].descriptor().connection, ConnectionKind::MockInProcess);
+        assert_eq!(test_registry[3].descriptor().roles, [AgentRole::Lead, AgentRole::Reviewer]);
         store.register_mock_for_test("mock-reviewer", "reviewer").unwrap();
         store.register_mock_for_test("mock-lead", "lead").unwrap();
         let instances = store.list_agent_instances().unwrap();

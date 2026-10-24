@@ -129,7 +129,8 @@ impl Engine {
             self.store.cancel_queued(session_id)?;
             self.store.audit("cancel_requested", json!({"runId":run_id,"sessionId":session_id}))?;
             run.snapshot.cancelling = true;
-            self.store.status("codex", "cancelling", "현재 실행을 중단하는 중")?;
+            let agent = self.store.session(session_id)?.agent_instance_id.unwrap_or("codex".into());
+            self.store.status(&agent, "cancelling", "현재 실행을 중단하는 중")?;
             let _ = run.stop.send(true);
         }
         drop(active);
@@ -142,9 +143,36 @@ impl Engine {
     }
     pub fn set_model_settings(&self, id: &str, settings: &ModelSettings) -> Result<Snapshot> {
         if !self.accepting.load(Ordering::SeqCst) { return Err("앱을 종료 중입니다".into()); }
+        if self.store.session(id)?.provider != "codex" { return Err("Codex 세션이 아닙니다".into()); }
         crate::models::validate(&self.models.lock().map_err(err)?, settings)?;
         self.store.set_model_settings(id, settings)?;
         self.store.invalidate_context(id)?;
+        self.emit()?;
+        self.snapshot()
+    }
+    pub async fn list_opencode_models(&self, id: &str) -> Result<Vec<crate::opencode::OpenCodeModel>> {
+        let saved = self.store.session(id)?;
+        if saved.provider != "opencode" { return Err("OpenCode 세션이 아닙니다".into()); }
+        let instance_id = saved.agent_instance_id.as_deref().ok_or("OpenCode 등록 ID가 없습니다")?;
+        let instance = self.store.list_agent_instances()?.into_iter().find(|i| i.id == instance_id)
+            .ok_or("OpenCode 등록을 찾을 수 없습니다")?;
+        if instance.active_role != Some("lead") || instance.installation != "installed" {
+            return Err("등록된 OpenCode CLI가 실행 가능하지 않습니다".into());
+        }
+        let path = instance.path.as_deref().ok_or("OpenCode 실행 파일 경로가 없습니다")?;
+        crate::opencode::list_models(std::path::Path::new(path), &self.data_dir).await
+    }
+    pub async fn set_opencode_model(&self, id: &str, model: Option<String>) -> Result<Snapshot> {
+        if !self.accepting.load(Ordering::SeqCst) { return Err("앱을 종료 중입니다".into()); }
+        if let Some(ref selected) = model {
+            let models = self.list_opencode_models(id).await?;
+            if !models.iter().any(|item| &item.model == selected) {
+                return Err("선택한 OpenCode 모델을 현재 목록에서 찾을 수 없습니다".into());
+            }
+        } else if self.store.session(id)?.provider != "opencode" {
+            return Err("OpenCode 세션이 아닙니다".into());
+        }
+        self.store.set_model_settings(id, &ModelSettings { model, reasoning_effort: None })?;
         self.emit()?;
         self.snapshot()
     }
@@ -203,6 +231,9 @@ impl Engine {
         };
         let local_id = session_id.unwrap_or("default-session".into());
         let saved = self.store.session(&local_id)?;
+        if (saved.provider == "opencode" && target != "opencode") || (saved.provider == "codex" && target == "opencode") {
+            return Err("이 세션의 에이전트와 메시지 대상이 다릅니다".into());
+        }
         let settings = ModelSettings { model: saved.model, reasoning_effort: saved.reasoning_effort };
         let message = self.store.routed_message(
             "user",
@@ -320,6 +351,8 @@ impl Engine {
                 let _ = self.emit();
                 continue;
             }
+            let agent_key = self.store.session(&input.message.chat_session_id).ok()
+                .and_then(|s| s.agent_instance_id).unwrap_or("codex".into());
             let (run_stop, run_stopped) = watch::channel(false);
             let run_id = uuid::Uuid::new_v4().to_string();
             *self.active.lock().unwrap() = Some(ActiveRun {
@@ -367,6 +400,8 @@ impl Engine {
                     }
                     Err(e) => Err(e),
                 }
+            } else if input.target == "opencode" {
+                self.opencode_turn(&input.message, run_stopped.clone()).await
             } else {
                 let result = self.codex_turn(&mut rpc, &input.message, &input.settings, run_stopped.clone()).await;
                 if rpc.is_some() { rpc_owner = Some(input.message.chat_session_id.clone()); }
@@ -389,7 +424,7 @@ impl Engine {
                         ("unknown".into(), detail)
                     }
                 };
-                let _ = self.store.status("codex", &status, &detail);
+                let _ = self.store.status(&agent_key, &status, &detail);
                 if let Ok(s) = self.store.snapshot() {
                     if s.agents.iter().any(|a| a.id == "antigravity" && a.status == "arch_running") {
                         let _ = self.store.status("antigravity", "cancelled", "사용자가 Arch 검토를 중단했습니다");
@@ -405,7 +440,7 @@ impl Engine {
                 // Keep it in SQLite as a recoverable, non-replayed input.
                 let _ = interrupt_consumed_input(&self.store, &input.message.id);
                 if e.contains("연결 정리 확인 불가 (unknown)") { connection_uncertain = true; }
-                let _ = self.error(if connection_uncertain { "codex" } else { &input.target }, &e);
+                let _ = self.error(if connection_uncertain { "codex" } else if input.target == "opencode" { &agent_key } else { &input.target }, &e);
                 if input.target == "codex" {
                     if let Some(mut old) = rpc.take() {
                         if let Err(close_error) = LeadSession::close(&mut old).await {
@@ -827,6 +862,31 @@ impl Engine {
                 }
             }
         }
+    }
+
+    async fn opencode_turn(&self, user: &Message, stop: watch::Receiver<bool>) -> Result<()> {
+        let saved = self.store.session(&user.chat_session_id)?;
+        let id = saved.agent_instance_id.as_deref().ok_or("OpenCode 등록 ID가 없습니다")?;
+        let instance = self.store.list_agent_instances()?.into_iter().find(|i| i.id == id)
+            .ok_or("OpenCode 등록을 찾을 수 없습니다")?;
+        if instance.active_role != Some("lead") || instance.installation != "installed" {
+            return Err("등록된 OpenCode CLI가 실행 가능하지 않습니다".into());
+        }
+        let path = instance.path.as_deref().ok_or("OpenCode 실행 파일 경로가 없습니다")?;
+        self.state(id, "running", "OpenCode 답변을 준비하는 중")?;
+        let answer = crate::opencode::run(
+            std::path::Path::new(path), &self.data_dir, saved.thread_id.as_deref(), saved.model.as_deref(), &user.content, stop.clone(),
+        ).await?;
+        if *stop.borrow() { return Err("OpenCode 실행 중단".into()); }
+        let turn = uuid::Uuid::new_v4().to_string();
+        self.store.bind_codex_session(&saved.id, &answer.session_id, &answer.session_id)?;
+        self.store.confirm_turn_start(&user.id, &answer.session_id, &turn)?;
+        self.store.routed_message("opencode", &answer.text, false, Route {
+            channel: "main", kind: "answer", thread_id: Some(answer.session_id),
+            turn_id: Some(turn), chat_session_id: Some(saved.id), ..Route::default()
+        })?;
+        self.state(id, "completed", "답변 완료")?;
+        Ok(())
     }
 }
 

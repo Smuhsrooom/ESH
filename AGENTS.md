@@ -21,7 +21,7 @@ ESH는 사용자, Codex Lead, Antigravity Arch가 대화하는 Windows 데스크
 | 화면 | React 19, TypeScript, Vite 6, Tailwind CSS 4, 자체 CSS |
 | 프런트 상태 | React hooks, Tauri snapshot/event, UI 선택·패널 너비는 localStorage |
 | 백엔드 | Rust, Tokio, serde/serde_json |
-| 저장 | rusqlite + SQLite WAL, 현재 schema `user_version=4` |
+| 저장 | rusqlite + SQLite WAL, 현재 schema `user_version=6` |
 | Codex 연결 | App Server stdio JSON-RPC, Dynamic Tools |
 | Arch 연결 | Antigravity `agy` CLI, `stream-json` + JSON schema |
 | 검증 | Rust 단위 테스트, Node 분류 회귀 검사, Python + 실제 Tauri WebView/CLI 증거 |

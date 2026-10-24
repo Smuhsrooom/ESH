@@ -1,7 +1,7 @@
 // Opt-in debug-only native WebView E2E driver. Never supplies AI responses.
 import { invoke } from '@tauri-apps/api/core';
 import { threadCategory } from './externalThreads';
-import type { CodexModel, Snapshot } from './types';
+import type { AgentCandidate, AgentInstance, CodexModel, Snapshot } from './types';
 const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 async function until(test: () => boolean | Promise<boolean>, seconds = 350) {
   const deadline = Date.now() + seconds * 1000;
@@ -307,8 +307,50 @@ export async function runGuiProbe(mode: string) {
   let reviewLayout: unknown = null;
   let agentStatus: unknown = null;
   let registryStatus: unknown = null;
+  let opencodeStatus: unknown = null;
   try {
-    if (mode === 'theme') {
+    if (mode === 'opencode') {
+      const candidates = await invoke<AgentCandidate[]>('detect_agent_candidates');
+      const path = candidates.find(item => item.provider === 'opencode' && item.installation === 'installed')?.path;
+      if (!path) throw new Error('OpenCode CLI candidate missing');
+      const instance = await invoke<AgentInstance>('register_agent_instance', { provider: 'opencode', path, role: 'lead' });
+      if (instance.activeRole !== 'lead') throw new Error('OpenCode Lead inactive');
+      document.querySelector<HTMLButtonElement>('[data-action="new-session"]')!.click();
+      await until(() => !!document.querySelector('.workspace-dialog select[aria-label="대화 에이전트"]'), 10);
+      await until(() => !!document.querySelector(`.workspace-dialog option[value="${instance.id}"]`), 10);
+      await fill('.workspace-dialog input[aria-label="이름"]', 'OpenCode GUI verification');
+      const select = document.querySelector<HTMLSelectElement>('.workspace-dialog select[aria-label="대화 에이전트"]')!;
+      Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')!.set!.call(select, instance.id);
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+      await wait(80);
+      document.querySelector<HTMLFormElement>('.workspace-dialog form')!.requestSubmit();
+      await until(() => !document.querySelector('.workspace-dialog'), 20);
+      let snap = await invoke<Snapshot>('get_snapshot');
+      const session = snap.sessions.find(item => item.name === 'OpenCode GUI verification');
+      if (!session || session.provider !== 'opencode' || session.agentInstanceId !== instance.id) throw new Error('OpenCode session not saved');
+      await submit('Reply with FIRST only.');
+      await until(async () => (await invoke<Snapshot>('get_snapshot')).messages.some(m => m.chatSessionId === session.id && m.speaker === 'opencode'), 120);
+      snap = await invoke<Snapshot>('get_snapshot');
+      const firstSessionId = snap.sessions.find(item => item.id === session.id)?.threadId;
+      if (!firstSessionId) throw new Error('OpenCode session ID missing');
+      await submit('Reply with SECOND only.');
+      await until(async () => (await invoke<Snapshot>('get_snapshot')).messages.filter(m => m.chatSessionId === session.id && m.speaker === 'opencode').length === 2, 120);
+      snap = await invoke<Snapshot>('get_snapshot');
+      if (snap.sessions.find(item => item.id === session.id)?.threadId !== firstSessionId) throw new Error('OpenCode resume changed session ID');
+      await until(() => document.querySelectorAll('[data-panel="main"] [data-speaker="opencode"]').length === 2, 10);
+      opencodeStatus = { instanceId: instance.id, localSessionId: session.id, externalSessionId: firstSessionId,
+        answers: snap.messages.filter(m => m.chatSessionId === session.id && m.speaker === 'opencode').map(m => m.content),
+        renderedCount: document.querySelectorAll('[data-panel="main"] [data-speaker="opencode"]').length };
+    } else if (mode === 'opencode-restore') {
+      const snap = await invoke<Snapshot>('get_snapshot');
+      const session = snap.sessions.find(item => item.name === 'OpenCode GUI verification');
+      if (!session || session.provider !== 'opencode' || !session.threadId) throw new Error('OpenCode session not restored');
+      document.querySelector<HTMLButtonElement>(`[data-session-id="${session.id}"]`)?.click();
+      await until(() => document.querySelectorAll('[data-panel="main"] [data-speaker="opencode"]').length === 2, 10);
+      opencodeStatus = { localSessionId: session.id, externalSessionId: session.threadId,
+        restoredAnswers: snap.messages.filter(m => m.chatSessionId === session.id && m.speaker === 'opencode').length,
+        renderedCount: document.querySelectorAll('[data-panel="main"] [data-speaker="opencode"]').length };
+    } else if (mode === 'theme') {
       const original = localStorage.getItem('esh.ui-theme');
       const emptyPanelInitiallyClosed = document.querySelector<HTMLElement>('[data-panel="collaboration"]')!.getBoundingClientRect().width === 0;
       if (!emptyPanelInitiallyClosed) throw new Error('검토 기록이 없는 새 세션에서 협업 패널이 접히지 않았어');
@@ -610,7 +652,7 @@ export async function runGuiProbe(mode: string) {
     const snapshot = await invoke<Snapshot>('get_snapshot');
     const rendered = [...[...document.querySelectorAll<HTMLElement>('[data-panel="main"] [data-message-id]')].map(node => renderedMessage(node, snapshot)), ...await reviewMessages(snapshot)];
     const agents = [...document.querySelectorAll<HTMLElement>('[data-agent]')].map(node => ({ id: node.dataset.agent, status: node.dataset.status, text: node.textContent }));
-    await invoke('record_gui_probe', { payload: { mode, workspace, importUi, modelSelection, markdownUi, cancellation, streaming, contextUsage, compact, focusFeedback, themeSelection, reviewLayout, agentStatus, registryStatus, contextDisplay: document.querySelector('[aria-label="Codex 컨텍스트 상태"]')?.textContent, composerSelection: {model: document.querySelector<HTMLSelectElement>('[aria-label="Codex 모델"]')?.value, effort: document.querySelector<HTMLSelectElement>('[aria-label="Codex 추론 강도"]')?.value}, selectedSessionId: document.querySelector<HTMLElement>('[data-session-id][aria-current="page"]')?.dataset.sessionId, startedAt, completedAt: new Date().toISOString(), rendered, agents, snapshot, resizeResults, initialPanelWidths, navigation, collaborationEditableCount: document.querySelectorAll('[data-panel="collaboration"] textarea, [data-panel="collaboration"] input:not([disabled]), [data-panel="collaboration"] form, [data-panel="collaboration"] [contenteditable="true"]').length, archivedIds: [...document.querySelectorAll<HTMLElement>('[data-archived-id]')].map(n => n.dataset.archivedId), alerts: [...document.querySelectorAll('[role="alert"]')].map(n => n.textContent) } });
+    await invoke('record_gui_probe', { payload: { mode, workspace, importUi, modelSelection, markdownUi, cancellation, streaming, contextUsage, compact, focusFeedback, themeSelection, reviewLayout, agentStatus, registryStatus, opencodeStatus, contextDisplay: document.querySelector('[aria-label="Codex 컨텍스트 상태"]')?.textContent, composerSelection: {model: document.querySelector<HTMLSelectElement>('[aria-label="Codex 모델"]')?.value, effort: document.querySelector<HTMLSelectElement>('[aria-label="Codex 추론 강도"]')?.value}, selectedSessionId: document.querySelector<HTMLElement>('[data-session-id][aria-current="page"]')?.dataset.sessionId, startedAt, completedAt: new Date().toISOString(), rendered, agents, snapshot, resizeResults, initialPanelWidths, navigation, collaborationEditableCount: document.querySelectorAll('[data-panel="collaboration"] textarea, [data-panel="collaboration"] input:not([disabled]), [data-panel="collaboration"] form, [data-panel="collaboration"] [contenteditable="true"]').length, archivedIds: [...document.querySelectorAll<HTMLElement>('[data-archived-id]')].map(n => n.dataset.archivedId), alerts: [...document.querySelectorAll('[role="alert"]')].map(n => n.textContent) } });
   } catch (e) {
     await invoke('record_gui_probe', { payload: { mode, startedAt, failed: String(e), body: document.body.innerText } });
   } finally { await invoke('close_probe'); }

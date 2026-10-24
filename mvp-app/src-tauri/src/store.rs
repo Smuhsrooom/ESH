@@ -54,6 +54,8 @@ pub struct Session {
     pub mode: String,
     pub model: Option<String>,
     pub reasoning_effort: Option<String>,
+    pub provider: String,
+    pub agent_instance_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -112,6 +114,7 @@ impl Store {
         crate::workspace::migrate_model_settings(&mut db)?;
         crate::context::migrate(&mut db)?;
         crate::registry::migrate(&mut db)?;
+        crate::workspace::migrate_agent_sessions(&mut db)?;
         crate::context::recover(&db)?;
         for agent in ["codex", "antigravity"] {
             db.execute(

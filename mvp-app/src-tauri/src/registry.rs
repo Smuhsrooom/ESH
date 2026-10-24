@@ -72,13 +72,14 @@ fn provider(provider: &str) -> Result<(&'static str, &'static str)> {
         .ok_or_else(|| "지원 후보 목록에 없는 에이전트 종류입니다".into())
 }
 
-fn active_role(provider: &str, connection: &str, role: &str, builtin: bool) -> Option<&'static str> {
-    if !builtin { return None; }
+fn active_role(provider: &str, connection: &str, role: &str, builtin: bool, path: Option<&str>) -> Option<&'static str> {
+    if !builtin && !(provider == "opencode" && path.is_some_and(|p| p.replace('\\', "/").to_lowercase().ends_with("/node_modules/opencode-ai/bin/opencode.exe"))) { return None; }
     registered().iter().find_map(|adapter| {
         let descriptor = adapter.descriptor();
         let expected_connection = match descriptor.connection {
             ConnectionKind::AppServerStdioJsonRpc => "app_server_stdio_json_rpc",
             ConnectionKind::AgyCliStreamJson => "agy_cli_stream_json",
+            ConnectionKind::OpenCodeCliJson => "opencode_cli_json",
             #[cfg(test)] ConnectionKind::MockInProcess => "mock_in_process",
         };
         if descriptor.id != provider || connection != expected_connection { return None; }
@@ -159,10 +160,11 @@ impl Store {
             let (id, provider, name, path, connection, role, source) = row.map_err(err)?;
             let builtin = source == "builtin";
             let (installation, failure_reason) = path.as_deref().map(|p| inspect(Path::new(p))).unwrap_or(("unknown", None));
-            let active_role = active_role(&provider, &connection, &role, builtin);
+            let active_role = active_role(&provider, &connection, &role, builtin, path.as_deref());
+            let supported = builtin || active_role.is_some();
             instances.push(Instance { id, provider, name, path, connection, role, active_role, builtin,
-                support: if builtin { "supported" } else { "unsupported" },
-                installation, authentication: "unknown", availability: if builtin { "unknown" } else { "unavailable" },
+                support: if supported { "supported" } else { "unsupported" },
+                installation, authentication: "unknown", availability: if supported { "unknown" } else { "unavailable" },
                 execution: "idle", checked_at: timestamp(), failure_reason });
         }
         Ok(instances)
@@ -184,16 +186,23 @@ impl Store {
         let db = self.db.lock().map_err(err)?;
         let exists: Option<String> = db.query_row("SELECT id FROM agent_instances WHERE provider=?1 AND path_key=?2", params![provider_id,key], |r| r.get(0)).optional().map_err(err)?;
         if exists.is_some() { return Err("이미 등록된 실행 파일입니다".into()); }
-        db.execute("INSERT INTO agent_instances(id,provider,name,executable_path,path_key,connection_kind,role,source,created_at) VALUES(?1,?2,?3,?4,?5,'not_configured',?6,'user',?7)",
-            params![id,provider_id,name,path_text,key,role,timestamp()]).map_err(err)?;
+        let connection = if provider_id == "opencode" && role == "lead" && path_text.replace('\\', "/").to_lowercase().ends_with("/node_modules/opencode-ai/bin/opencode.exe") { "opencode_cli_json" } else { "not_configured" };
+        db.execute("INSERT INTO agent_instances(id,provider,name,executable_path,path_key,connection_kind,role,source,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7,'user',?8)",
+            params![id,provider_id,name,path_text,key,connection,role,timestamp()]).map_err(err)?;
+        if connection == "opencode_cli_json" {
+            db.execute("INSERT OR IGNORE INTO agents(id,status,detail,updated_at) VALUES(?1,'idle','대기 중',?2)", params![id,timestamp()]).map_err(err)?;
+        }
         drop(db);
         self.list_agent_instances()?.into_iter().find(|item| item.id == id).ok_or_else(|| "등록 결과를 읽을 수 없습니다".into())
     }
 
     pub fn unregister_agent_instance(&self, id: &str) -> Result<()> {
         let db = self.db.lock().map_err(err)?;
+        let sessions: i64 = db.query_row("SELECT COUNT(*) FROM chat_sessions WHERE agent_instance_id=?1", [id], |r| r.get(0)).map_err(err)?;
+        if sessions > 0 { return Err("이 에이전트를 사용하는 세션이 있어 등록 해제할 수 없습니다".into()); }
         let count = db.execute("DELETE FROM agent_instances WHERE id=?1 AND source='user'", [id]).map_err(err)?;
         if count == 0 { return Err("등록 해제할 사용자 에이전트를 찾을 수 없습니다".into()); }
+        db.execute("DELETE FROM agents WHERE id=?1", [id]).map_err(err)?;
         Ok(())
     }
 }
@@ -247,7 +256,7 @@ mod tests {
         assert_eq!(reopened.list_agent_instances().unwrap().len(), 2);
         drop(reopened);
         let db = Connection::open(&path).unwrap();
-        assert_eq!(db.query_row("PRAGMA user_version", [], |r| r.get::<_,i64>(0)).unwrap(), 5);
+        assert_eq!(db.query_row("PRAGMA user_version", [], |r| r.get::<_,i64>(0)).unwrap(), 6);
         assert_eq!(db.query_row("SELECT COUNT(*) FROM messages WHERE id=?1", [&message.id], |r| r.get::<_,i64>(0)).unwrap(), 1);
         assert_eq!(db.query_row("SELECT COUNT(*) FROM agents", [], |r| r.get::<_,i64>(0)).unwrap(), 2);
         assert_eq!(db.query_row("SELECT COUNT(*) FROM chat_sessions", [], |r| r.get::<_,i64>(0)).unwrap(), 1);
@@ -290,5 +299,48 @@ mod tests {
         let instances = store.list_agent_instances().unwrap();
         assert_eq!(instances.iter().find(|entry| entry.id == "codex").unwrap().active_role, None);
         assert_eq!(instances.iter().find(|entry| entry.id == "antigravity").unwrap().active_role, None);
+    }
+
+    #[test]
+    fn opencode_lead_session_survives_reopen_and_keeps_registered_cli() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("chat.sqlite");
+        let cli = temp.path().join("node_modules/opencode-ai/bin/opencode.exe");
+        std::fs::create_dir_all(cli.parent().unwrap()).unwrap();
+        std::fs::write(&cli, b"probe only").unwrap();
+        let store = Store::open(&path).unwrap();
+        let instance = store.register_agent_instance("opencode", &cli.to_string_lossy(), "lead").unwrap();
+        assert_eq!((instance.connection.as_str(), instance.active_role), ("opencode_cli_json", Some("lead")));
+        let session = store.create_opencode_session("default", "OpenCode test", &instance.id).unwrap();
+        assert_eq!((session.provider.as_str(), session.agent_instance_id.as_deref()), ("opencode", Some(instance.id.as_str())));
+        assert!(store.unregister_agent_instance(&instance.id).is_err());
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        let saved = reopened.session(&session.id).unwrap();
+        assert_eq!((saved.provider.as_str(), saved.agent_instance_id.as_deref()), ("opencode", Some(instance.id.as_str())));
+        assert_eq!(reopened.list_agent_instances().unwrap().into_iter().find(|a| a.id == instance.id).unwrap().active_role, Some("lead"));
+    }
+
+    #[test]
+    fn v5_opencode_registration_migrates_without_losing_chat() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("chat.sqlite");
+        let cli = temp.path().join("node_modules/opencode-ai/bin/opencode.exe");
+        std::fs::create_dir_all(cli.parent().unwrap()).unwrap();
+        std::fs::write(&cli, b"probe only").unwrap();
+        let store = Store::open(&path).unwrap();
+        let message = store.message("user", "preserved", false).unwrap();
+        let instance = store.register_agent_instance("opencode", &cli.to_string_lossy(), "lead").unwrap();
+        drop(store);
+        let db = Connection::open(&path).unwrap();
+        db.execute("UPDATE agent_instances SET connection_kind='not_configured' WHERE id=?1", [&instance.id]).unwrap();
+        db.execute_batch("ALTER TABLE chat_sessions DROP COLUMN provider;
+            ALTER TABLE chat_sessions DROP COLUMN agent_instance_id;
+            PRAGMA user_version=5;").unwrap();
+        drop(db);
+        let migrated = Store::open(&path).unwrap();
+        assert_eq!(migrated.snapshot().unwrap().messages[0].id, message.id);
+        assert_eq!(migrated.session("default-session").unwrap().provider, "codex");
+        assert_eq!(migrated.list_agent_instances().unwrap().into_iter().find(|a| a.id == instance.id).unwrap().active_role, Some("lead"));
     }
 }

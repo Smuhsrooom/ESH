@@ -4,6 +4,7 @@ mod agents;
 #[cfg(test)]
 mod mock_agent;
 mod registry;
+mod opencode;
 mod engine;
 mod models;
 mod store;
@@ -72,6 +73,16 @@ async fn list_codex_models(engine: tauri::State<'_, Arc<Engine>>) -> Result<Vec<
 }
 
 #[tauri::command]
+async fn list_opencode_models(session_id: String, engine: tauri::State<'_, Arc<Engine>>) -> Result<Vec<opencode::OpenCodeModel>> {
+    engine.list_opencode_models(&session_id).await
+}
+
+#[tauri::command]
+async fn set_opencode_model(session_id: String, model: Option<String>, engine: tauri::State<'_, Arc<Engine>>) -> Result<Snapshot> {
+    engine.set_opencode_model(&session_id, model).await
+}
+
+#[tauri::command]
 fn compact_session(session_id: String, engine: tauri::State<'_, Arc<Engine>>) -> Result<Snapshot> {
     engine.request_compact(&session_id)
 }
@@ -101,9 +112,12 @@ fn create_room(name: String, engine: tauri::State<'_, Arc<Engine>>) -> Result<wo
 fn create_session(
     room_id: String,
     name: String,
+    agent_instance_id: Option<String>,
     engine: tauri::State<'_, Arc<Engine>>,
 ) -> Result<store::Session> {
-    let session = engine.store.create_session(&room_id, &name)?;
+    let session = if let Some(id) = agent_instance_id {
+        engine.store.create_opencode_session(&room_id, &name, &id)?
+    } else { engine.store.create_session(&room_id, &name)? };
     engine.emit()?;
     Ok(session)
 }
@@ -211,8 +225,12 @@ fn main() {
     let closing = Arc::new(AtomicBool::new(false));
     tauri::Builder::default()
         .setup(|app| {
-            let data_dir = std::env::var_os("ESH_DATA_DIR")
-                .map(PathBuf::from)
+            let probe_dir = if cfg!(debug_assertions) {
+                std::env::args_os().collect::<Vec<_>>().windows(2)
+                    .find(|args| args[0] == "--esh-data-dir")
+                    .map(|args| PathBuf::from(&args[1]))
+            } else { None };
+            let data_dir = probe_dir.or_else(|| std::env::var_os("ESH_DATA_DIR").map(PathBuf::from))
                 .unwrap_or(app.path().app_local_data_dir()?);
             let window_data_dir = data_dir.clone();
             let engine =
@@ -232,6 +250,8 @@ fn main() {
             unregister_agent_instance,
             cancel_run,
             list_codex_models,
+            list_opencode_models,
+            set_opencode_model,
             compact_session,
             set_session_model_settings,
             send_message,

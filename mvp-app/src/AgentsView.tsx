@@ -56,10 +56,10 @@ export function AgentsView({ snapshot, probes, checking, probeError, onRefresh }
   const registered = instances.filter(item => !item.builtin);
   const selectedInstance = registered.find(item => item.id === selectedId);
   const selectedBuiltin = instances.find(item => item.builtin && item.id === selectedId);
-  const selected = snapshot.agents.find(agent => agent.id === selectedId) ?? snapshot.agents[0];
+  const selected = snapshot.agents.find(agent => agent.id === selectedId);
   const displayName = selectedInstance?.name ?? (selected ? agentName(selected.id) : '');
   const probe = probes.find(item => item.id === selectedId);
-  const sessionId = !selectedInstance && selected && activeStatuses.has(selected.status)
+  const sessionId = selected && activeStatuses.has(selected.status)
     ? snapshot.activeRun?.sessionId ?? snapshot.busySessionId : null;
   const runId = sessionId && snapshot.activeRun?.sessionId === sessionId ? snapshot.activeRun.id : null;
   const execution = selected && activeStatuses.has(selected.status) && !sessionId
@@ -74,7 +74,7 @@ export function AgentsView({ snapshot, probes, checking, probeError, onRefresh }
     {adding && <section className="v0-agent-add" aria-label="에이전트 추가"><div className="v0-agent-add-head"><strong>에이전트 추가</strong><button type="button" onClick={() => setAdding(false)} aria-label="닫기">닫기</button></div><div className="v0-agent-candidates" aria-label="탐지 후보">{candidates.map(candidate => <button key={candidate.provider} type="button" data-candidate={candidate.provider} className={provider === candidate.provider ? 'selected' : ''} onClick={() => { setProvider(candidate.provider); setPath(candidate.path ?? ''); }}><span>{candidate.name}</span><small>{probeLabels[candidate.installation] ?? candidate.installation}</small></button>)}</div><label>종류<select aria-label="에이전트 종류" value={provider} onChange={e => { setProvider(e.target.value); setPath(candidates.find(c => c.provider === e.target.value)?.path ?? ''); }}><option value="claude_code">Claude Code</option><option value="gemini_cli">Gemini CLI</option><option value="opencode">OpenCode</option></select></label><label>실행 파일 경로<input aria-label="실행 파일 경로" value={path} onChange={e => setPath(e.target.value)} placeholder="C:\\...\\claude.exe"/></label><label>희망 역할<select aria-label="희망 역할" value={role} onChange={e => setRole(e.target.value)}><option value="lead">Lead</option><option value="reviewer">Reviewer</option></select></label><button type="button" data-action="register-agent" disabled={working || !path.trim()} onClick={() => void register()}>등록</button></section>}
     <div className="v0-agents-layout">
       <nav className="v0-agents-list" aria-label="에이전트 목록">
-        {snapshot.agents.map(agent => {
+        {snapshot.agents.filter(agent => agent.id === 'codex' || agent.id === 'antigravity').map(agent => {
           const item = probes.find(value => value.id === agent.id);
           const active = activeStatuses.has(agent.status);
           const owner = active ? snapshot.activeRun?.sessionId ?? snapshot.busySessionId : null;
@@ -83,7 +83,7 @@ export function AgentsView({ snapshot, probes, checking, probeError, onRefresh }
             <span className={`v0-dot ${agent.id}`} aria-hidden="true"/><span>{agentName(agent.id)}</span><small>{executionLabels[agent.status] ?? agent.status}</small>
           </button>;
         })}
-        {registered.map(item => <button key={item.id} type="button" className={selectedId === item.id ? 'selected' : ''} data-agent={item.id} data-provider={item.provider} data-support={item.support} data-installation={item.installation} data-authentication={item.authentication} data-availability={item.availability} data-status={item.execution} onClick={() => setSelectedId(item.id)}><span className="v0-dot" aria-hidden="true"/><span>{item.name}</span><small>미지원</small></button>)}
+        {registered.map(item => <button key={item.id} type="button" className={selectedId === item.id ? 'selected' : ''} data-agent={item.id} data-provider={item.provider} data-support={item.support} data-installation={item.installation} data-authentication={item.authentication} data-availability={item.availability} data-status={snapshot.agents.find(a => a.id === item.id)?.status ?? item.execution} onClick={() => setSelectedId(item.id)}><span className="v0-dot" aria-hidden="true"/><span>{item.name}</span><small>{item.support === 'supported' ? executionLabels[snapshot.agents.find(a => a.id === item.id)?.status ?? 'idle'] : '미지원'}</small></button>)}
       </nav>
       {(selected || selectedInstance) && <section className="v0-agents-detail" aria-label={`${displayName} 상세 정보`}>
         <h2>{displayName}</h2>
@@ -91,10 +91,10 @@ export function AgentsView({ snapshot, probes, checking, probeError, onRefresh }
           <div><dt>설치</dt><dd>{status(selectedInstance?.installation ?? probe?.installation)}</dd></div>
           <div><dt>인증</dt><dd>{status(selectedInstance?.authentication ?? probe?.authentication)}</dd></div>
           <div><dt>실행 가능</dt><dd>{status(selectedInstance?.availability ?? probe?.availability)}</dd></div>
-          <div><dt>실행 상태</dt><dd>{selectedInstance ? executionLabels[selectedInstance.execution] ?? selectedInstance.execution : execution}</dd></div>
-          <div><dt>연결 방식</dt><dd>{selectedInstance ? '설정 필요' : probe?.connection ?? '점검 전'}</dd></div>
+          <div><dt>실행 상태</dt><dd>{execution}</dd></div>
+          <div><dt>연결 방식</dt><dd>{selectedInstance ? selectedInstance.connection === 'opencode_cli_json' ? 'OpenCode CLI · JSON' : '설정 필요' : probe?.connection ?? '점검 전'}</dd></div>
           <div><dt>활성 역할</dt><dd data-active-role={selectedInstance?.activeRole ?? selectedBuiltin?.activeRole ?? ''}>{selectedInstance?.activeRole === 'lead' || selectedBuiltin?.activeRole === 'lead' ? 'Lead' : selectedInstance?.activeRole === 'reviewer' || selectedBuiltin?.activeRole === 'reviewer' ? 'Reviewer' : selectedInstance || selectedBuiltin ? '없음' : '확인 중'}</dd></div>
-          {selectedInstance && <><div><dt>지원</dt><dd>미지원</dd></div><div><dt>종류</dt><dd>{selectedInstance.provider}</dd></div><div><dt>인스턴스 ID</dt><dd className="v0-agents-id">{selectedInstance.id}</dd></div><div><dt>희망 역할</dt><dd>{selectedInstance.role === 'lead' ? 'Lead' : 'Reviewer'}</dd></div><div><dt>실행 파일</dt><dd>{selectedInstance.path}</dd></div></>}
+          {selectedInstance && <><div><dt>지원</dt><dd>{selectedInstance.support === 'supported' ? '지원' : '미지원'}</dd></div><div><dt>종류</dt><dd>{selectedInstance.provider}</dd></div><div><dt>인스턴스 ID</dt><dd className="v0-agents-id">{selectedInstance.id}</dd></div><div><dt>희망 역할</dt><dd>{selectedInstance.role === 'lead' ? 'Lead' : 'Reviewer'}</dd></div><div><dt>실행 파일</dt><dd>{selectedInstance.path}</dd></div></>}
           <div><dt>점검 시각</dt><dd>{checkedAt}</dd></div>
           {sessionId && <div><dt>세션</dt><dd>{snapshot.sessions.find(item => item.id === sessionId)?.name ?? sessionId}<small title={sessionId}>{sessionId}</small></dd></div>}
           {runId && <div><dt>실행 ID</dt><dd className="v0-agents-id">{runId}</dd></div>}

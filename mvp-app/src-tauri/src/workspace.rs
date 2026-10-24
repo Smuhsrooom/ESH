@@ -78,8 +78,31 @@ pub fn migrate_model_settings(db: &mut Connection) -> Result<()> {
     tx.commit().map_err(err)
 }
 
+pub fn migrate_agent_sessions(db: &mut Connection) -> Result<()> {
+    let version: i64 = db.query_row("PRAGMA user_version", [], |r| r.get(0)).map_err(err)?;
+    if version >= 6 { return Ok(()); }
+    let columns = db.prepare("PRAGMA table_info(chat_sessions)").map_err(err)?
+        .query_map([], |r| r.get::<_, String>(1)).map_err(err)?
+        .collect::<rusqlite::Result<Vec<_>>>().map_err(err)?;
+    let tx = db.transaction().map_err(err)?;
+    if !columns.iter().any(|c| c == "provider") {
+        tx.execute_batch("ALTER TABLE chat_sessions ADD COLUMN provider TEXT NOT NULL DEFAULT 'codex'").map_err(err)?;
+    }
+    if !columns.iter().any(|c| c == "agent_instance_id") {
+        tx.execute_batch("ALTER TABLE chat_sessions ADD COLUMN agent_instance_id TEXT").map_err(err)?;
+    }
+    tx.execute_batch("UPDATE agent_instances SET connection_kind='opencode_cli_json'
+          WHERE provider='opencode' AND role='lead' AND source='user'
+          AND lower(replace(executable_path,'\\','/')) LIKE '%/node_modules/opencode-ai/bin/opencode.exe';
+        INSERT OR IGNORE INTO agents(id,status,detail,updated_at)
+          SELECT id,'idle','대기 중',created_at FROM agent_instances
+          WHERE provider='opencode' AND connection_kind='opencode_cli_json';
+        PRAGMA user_version=6;").map_err(err)?;
+    tx.commit().map_err(err)
+}
+
 pub fn sessions(db: &Connection) -> Result<Vec<Session>> {
-    let mut q=db.prepare("SELECT id,codex_session_id,created_at,room_id,name,thread_id,source_thread_id,mode,model,reasoning_effort FROM chat_sessions ORDER BY created_at,id").map_err(err)?;
+    let mut q=db.prepare("SELECT id,codex_session_id,created_at,room_id,name,thread_id,source_thread_id,mode,model,reasoning_effort,provider,agent_instance_id FROM chat_sessions ORDER BY created_at,id").map_err(err)?;
     let rows = q
         .query_map([], |r| {
             Ok(Session {
@@ -93,6 +116,8 @@ pub fn sessions(db: &Connection) -> Result<Vec<Session>> {
                 mode: r.get(7)?,
                 model: r.get(8)?,
                 reasoning_effort: r.get(9)?,
+                provider: r.get(10)?,
+                agent_instance_id: r.get(11)?,
             })
         })
         .map_err(err)?
@@ -148,6 +173,20 @@ impl Store {
     }
     pub fn create_session(&self, room_id: &str, value: &str) -> Result<Session> {
         self.add_session(room_id, value, None, "new", &[])
+    }
+    pub fn create_opencode_session(&self, room_id: &str, value: &str, instance_id: &str) -> Result<Session> {
+        let instance = self.list_agent_instances()?.into_iter().find(|i| i.id == instance_id)
+            .ok_or("OpenCode 등록을 찾을 수 없습니다")?;
+        if instance.provider != "opencode" || instance.active_role != Some("lead") || instance.installation != "installed" {
+            return Err("실행 가능한 OpenCode Lead 등록이 아닙니다".into());
+        }
+        let mut created = self.add_session(room_id, value, None, "new", &[])?;
+        let db = self.db.lock().map_err(err)?;
+        db.execute("UPDATE chat_sessions SET provider='opencode',agent_instance_id=?1 WHERE id=?2", params![instance_id,created.id]).map_err(err)?;
+        db.execute("UPDATE meta SET revision=revision+1", []).map_err(err)?;
+        created.provider = "opencode".into();
+        created.agent_instance_id = Some(instance_id.into());
+        Ok(created)
     }
     pub fn session(&self, id: &str) -> Result<Session> {
         sessions(&*self.db.lock().map_err(err)?)?
@@ -224,6 +263,8 @@ impl Store {
             mode: mode.into(),
             model: None,
             reasoning_effort: None,
+            provider: "codex".into(),
+            agent_instance_id: None,
         })
     }
 }
