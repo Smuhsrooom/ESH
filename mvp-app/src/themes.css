@@ -1,0 +1,144 @@
+/* The user supplied palette values are the source of truth. Derived states use color-mix. */
+:root, :root[data-theme='slate'] {
+  --ui-bg: #202020;
+  --ui-surface: #292929;
+  --ui-border: #3B3B3B;
+  --ui-text: #E5E5E5;
+  --ui-muted: #A1A1A1;
+  --ui-accent: #8EADEB;
+  --ui-secondary: #8EADEB;
+  --ui-tertiary: #8EADEB;
+}
+:root[data-theme='lilac'] {
+  --ui-bg: #101010;
+  --ui-surface: #1C1C1C;
+  --ui-border: #363238;
+  --ui-text: #E4E0E5;
+  --ui-muted: color-mix(in srgb, var(--ui-text) 65%, var(--ui-bg));
+  --ui-accent: #C6A0F6;
+  --ui-secondary: #F29BC1;
+  --ui-tertiary: #F29BC1;
+}
+:root[data-theme='classic'] {
+  --ui-bg: #2B2B2B;
+  --ui-surface: #3C3F41;
+  --ui-border: color-mix(in srgb, var(--ui-surface) 78%, var(--ui-text));
+  --ui-text: #A9B7C6;
+  --ui-muted: color-mix(in srgb, var(--ui-text) 72%, var(--ui-bg));
+  --ui-accent: #CC7832;
+  --ui-secondary: #6A8759;
+  --ui-tertiary: #6897BB;
+}
+:root {
+  --ui-hover: color-mix(in srgb, var(--ui-surface) 80%, var(--ui-text));
+  --ui-selected: color-mix(in srgb, var(--ui-surface) 82%, var(--ui-accent));
+  --ui-soft-accent: color-mix(in srgb, var(--ui-surface) 86%, var(--ui-accent));
+  --ui-soft-secondary: color-mix(in srgb, var(--ui-surface) 88%, var(--ui-secondary));
+  --ui-border-soft: color-mix(in srgb, var(--ui-border) 70%, transparent);
+  --ui-overlay: color-mix(in srgb, #000 68%, transparent);
+  color: var(--ui-text);
+  background: var(--ui-bg);
+  scrollbar-color: var(--ui-border) transparent;
+}
+body { background: var(--ui-bg); }
+button:focus-visible, summary:focus-visible { outline-color: var(--ui-accent); }
+.v0-shell { color: var(--ui-text); background: var(--ui-bg); }
+.v0-shell[data-focus-mode='keyboard'] :is(button, summary, a, input, select, textarea, [role='separator']):focus { outline-color: var(--ui-accent); }
+.v0-shell .panel-resizer { background: var(--ui-bg); }
+.v0-shell .panel-resizer:hover, .v0-shell[data-focus-mode='keyboard'] .panel-resizer:focus { background: var(--ui-border); }
+.v0-explorer, .v0-collaboration, .v0-main, .v0-review-list { background: var(--ui-bg); }
+.v0-explorer { border-right-color: var(--ui-border); }
+.v0-collaboration { border-left-color: var(--ui-border); }
+.v0-side-header, .v0-main-header, .v0-collab-header, .v0-primary-nav, .v0-review-heading, .v0-search { border-bottom-color: var(--ui-border); }
+.v0-icon-button, .v0-search button, .v0-primary-nav button, .v0-primary-nav small, .v0-kicker,
+.v0-agent-row small, .v0-section-head button, .v0-room summary svg, .v0-room summary small,
+.v0-room-actions button, .v0-session, .v0-muted-note, .v0-agent-detail small,
+.v0-archive summary, .v0-archive article p, .v0-explorer-footer small, .v0-rail-button,
+.v0-lead small, .v0-empty p, .v0-conversation-scroll .message-meta, .v0-review-callout small,
+.v0-review-callout > svg:last-child, .v0-composer textarea::placeholder, .v0-select-wrap,
+.v0-select-wrap select, .v0-composer-hint, .v0-collab-header small, .v0-review-heading,
+.v0-review-heading span, .v0-review-title small, .v0-review-detail .message-meta,
+.v0-review-detail .message-meta time, .v0-collab-empty { color: var(--ui-muted); }
+.v0-icon-button:hover:not(:disabled), .v0-section-head button:hover, .v0-room-actions button:hover,
+.v0-agents-header button:hover:not(:disabled), .v0-agents-list button:hover,
+.v0-footer-menu button:hover, .v0-review-thread:hover, .context-trigger:hover,
+.context-trigger[aria-expanded='true'] { background: var(--ui-hover); color: var(--ui-text); }
+.v0-search input, .v0-select-wrap select option { background: var(--ui-surface); color: var(--ui-text); border-color: var(--ui-border); }
+.v0-new-row button, .v0-connections, .v0-footer-menu, .v0-review-callout,
+.v0-composer, .v0-composer-area .context-status, .v0-composer-area .context-compact,
+.v0-review-detail .markdown-body,
+.v0-shell .workspace-dialog { background: var(--ui-surface); color: var(--ui-text); border-color: var(--ui-border); }
+.v0-conversation-scroll .message-card:not(.user-card) > p,
+.v0-conversation-scroll .markdown-body { background: transparent; color: var(--ui-text); border-color: transparent; }
+.v0-conversation-scroll .message-turn-divider { border-top-color: var(--ui-border); }
+.v0-new-row button:hover { background: var(--ui-hover); }
+.v0-collab-toggle:hover, .v0-collab-toggle[aria-expanded='false'] { background: var(--ui-soft-accent); color: var(--ui-text); }
+.v0-primary-nav button:hover, .v0-primary-nav button.active, .v0-session:hover,
+.v0-session.selected, .v0-agents-list button.selected { background: var(--ui-selected); color: var(--ui-text); }
+.v0-agents-list, .v0-agents-facts > div { border-color: var(--ui-border); }
+.v0-agents-header button, .v0-agents-list button small, .v0-agents-facts dt, .v0-agents-facts dd small { color: var(--ui-muted); }
+.v0-room[open]::before { background: var(--ui-border); }
+.v0-room summary, .v0-agent-row, .v0-conversation-scroll .message-meta strong,
+.v0-review-title strong, .v0-review-detail .message-meta strong { color: var(--ui-text); }
+.v0-room-actions { background: var(--ui-bg); }
+.v0-agent-detail, .v0-archive, .v0-explorer-footer { border-color: var(--ui-border); }
+.v0-connections .v0-kicker span, .v0-dot.codex, .v0-dot.done,
+.v0-review-thread:has(.done) em { color: var(--ui-secondary); }
+.v0-dot.codex, .v0-dot.done { background: var(--ui-secondary); box-shadow: 0 0 9px color-mix(in srgb, var(--ui-secondary) 40%, transparent); }
+.v0-dot.antigravity { background: var(--ui-accent); box-shadow: 0 0 9px color-mix(in srgb, var(--ui-accent) 40%, transparent); }
+.v0-dot.waiting { background: var(--ui-tertiary); box-shadow: 0 0 9px color-mix(in srgb, var(--ui-tertiary) 40%, transparent); }
+.v0-conversation-scroll .message-card.user-card,
+.v0-review-detail .message-card[data-speaker='antigravity'] .markdown-body { background: var(--ui-soft-accent); border-color: var(--ui-border); }
+.v0-conversation-scroll .user-card > p { color: var(--ui-text); }
+.v0-review-callout { background: transparent; border-top-color: var(--ui-border); }
+.v0-review-callout:hover { background: transparent; color: var(--ui-accent); }
+.v0-review-callout > svg:first-child, .v0-review-thread em { color: var(--ui-tertiary); }
+.v0-composer-area { background: linear-gradient(180deg, transparent, var(--ui-bg) 15%); }
+.v0-composer { box-shadow: 0 0 45px color-mix(in srgb, var(--ui-accent) 10%, transparent); }
+.v0-shell[data-focus-mode='keyboard'] .v0-composer:focus-within { border-color: var(--ui-accent); }
+.v0-composer textarea, .v0-review-back { color: var(--ui-text) !important; }
+.v0-effort { border-left-color: var(--ui-border); }
+.v0-shell .v0-send, .v0-shell .v0-send:hover:not(:disabled), .v0-shell .workspace-dialog footer button[type=submit] { background: var(--ui-accent); color: var(--ui-bg); }
+.v0-send:hover:not(:disabled), .v0-shell .workspace-dialog footer button[type=submit]:hover { filter: brightness(1.12); }
+.context-trigger, .context-pct { color: var(--ui-text); }
+.context-ring-track { stroke: var(--ui-border); }
+.context-ring-progress { stroke: var(--ui-accent); }
+.v0-review-thread:has(.unknown) em { color: var(--ui-muted); }
+.v0-review-detail .markdown-body { border-color: var(--ui-border); }
+.v0-shell .modal-backdrop { background: var(--ui-overlay); }
+.v0-shell .workspace-dialog input:not([type=radio]):not([type=checkbox]),
+.v0-shell .workspace-dialog select { background: var(--ui-bg); color: var(--ui-text); }
+
+/* Dialogs, context popups and rendered Markdown are shared with the older stylesheet. */
+.workspace-dialog, .composer-area form, .message-card, .context-status { background: var(--ui-surface); color: var(--ui-text); border-color: var(--ui-border); }
+.workspace-dialog button, .workspace-dialog input:not([type=radio]):not([type=checkbox]),
+.workspace-dialog select, .context-compact { background: var(--ui-bg); color: var(--ui-text); border-color: var(--ui-border); }
+.workspace-dialog footer button[type=submit] { background: var(--ui-accent); color: var(--ui-bg); }
+.field-label, .verification-toggle, .external-list small, .external-list p, .import-note,
+.context-actions small, .context-status details, .context-status, .review-label,
+.message-meta time, .message-footer, .delivery, .stream-label { color: var(--ui-muted); }
+.external-list, .external-list label, .markdown-body th, .markdown-body td,
+.markdown-body hr { border-color: var(--ui-border); }
+.external-list label:has(input:checked) { background: var(--ui-soft-accent); }
+.markdown-body, .markdown-body h1, .markdown-body h2, .markdown-body h3,
+.markdown-body h4, .markdown-body h5, .markdown-body h6, .markdown-body strong,
+.markdown-body th { color: var(--ui-text); }
+.markdown-body a, .verification-badge { color: var(--ui-accent); }
+.markdown-body blockquote { color: var(--ui-muted); border-left-color: var(--ui-accent); background: var(--ui-soft-accent); }
+.markdown-body code, .markdown-body th { background: var(--ui-hover); }
+.markdown-body pre { background: var(--ui-bg); border-color: var(--ui-border); }
+.markdown-body pre code { background: transparent; }
+.v0-conversation-scroll .markdown-body table, .v0-conversation-scroll .markdown-body pre code { font-size: 13px; }
+.markdown-body .task-list-item input { accent-color: var(--ui-accent); }
+.context-meter { background: var(--ui-border); }
+.context-meter i { background: var(--ui-accent); }
+.context-compact:hover:not(:disabled) { border-color: var(--ui-accent); color: var(--ui-accent); }
+.context-control[data-compaction='compacting'] .context-popup,
+.context-status[data-compaction='compacting'] { border-color: var(--ui-secondary); color: var(--ui-secondary); }
+
+.v0-theme-picker { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px; margin-top: 5px; padding: 8px 2px 2px; border-top: 1px solid var(--ui-border); }
+.v0-theme-picker > span { grid-column: 1 / -1; margin: 0 6px 3px; color: var(--ui-muted); font-size: 11px; }
+.v0-footer-menu .v0-theme-option { display: flex; flex-direction: column; align-items: center; gap: 5px; padding: 7px 3px; border: 1px solid transparent; text-align: center; color: var(--ui-muted); }
+.v0-footer-menu .v0-theme-option[aria-pressed='true'] { border-color: var(--ui-accent); background: var(--ui-soft-accent); color: var(--ui-text); }
+.v0-theme-swatches { display: flex; width: 100%; height: 18px; overflow: hidden; border: 1px solid var(--ui-border); border-radius: 4px; }
+.v0-theme-swatches i { flex: 1; }

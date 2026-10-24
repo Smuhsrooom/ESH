@@ -37,7 +37,7 @@ const wide = "''' + ('long-line-'*60) + '''";
 '''
         fixtures=[('markdown-user','user','# 사용자 원문\n**편집한 글 그대로**','main','user_message'),
                   ('markdown-lead','codex',content,'main','answer'),
-                  ('markdown-arch','antigravity','## Arch 검토\n\n- [x] 확인 완료\n- [ ] 대기','collaboration','review_reply')]
+                  ('markdown-arch','antigravity','## Arch 검토\n\n- [x] 확인 완료\n- [ ] 대기\n\n| 항목 | 판단 | 근거 |\n| --- | --- | --- |\n| 긴 코드 | 완료 | 길게_이어지는_식별자_줄바꿈_검증_내용_입니다 |','collaboration','review_reply')]
         db=sqlite3.connect(data/'chat.sqlite')
         for id,speaker,text,channel,kind in fixtures:
             db.execute("INSERT INTO messages(id,speaker,content,created_at,delivery,version,is_error,channel,kind,room_id,chat_session_id,collaboration_id) VALUES(?,?,?,'2026-10-18T00:00:00Z','delivered',0,0,?,?,'default','default-session','rendering-fixture')",(id,speaker,text,channel,kind))

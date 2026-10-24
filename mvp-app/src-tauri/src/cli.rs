@@ -596,7 +596,7 @@ pub async fn arch(
     result
 }
 
-fn validate_arch_result(value: &Value, review_id: &str, version: i64) -> Result<()> {
+pub(crate) fn validate_arch_result(value: &Value, review_id: &str, version: i64) -> Result<()> {
     if value["reviewId"] != review_id
         || value["conversationVersion"] != version
         || value["answer"].as_str().unwrap_or("").trim().is_empty()
@@ -609,6 +609,56 @@ fn validate_arch_result(value: &Value, review_id: &str, version: i64) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn mock_stdio_keeps_one_tool_reply_on_the_original_rpc_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tool.sqlite");
+        let store = Arc::new(Store::open(&path).unwrap());
+        // A one-line stdio peer is enough to inspect the actual JSON-RPC write.
+        let mut child = Command::new("powershell.exe")
+            .args(["-NoProfile", "-Command", "$line=[Console]::ReadLine(); [Console]::WriteLine($line)"])
+            .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null())
+            .kill_on_drop(true).spawn().unwrap();
+        let input = child.stdin.take();
+        let output = child.stdout.take().unwrap();
+        let (sender, receiver) = mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            let mut lines = BufReader::new(output).lines();
+            if let Ok(Some(line)) = lines.next_line().await {
+                sender.send(serde_json::from_str::<Value>(&line).unwrap()).unwrap();
+            }
+        });
+        let mut rpc = Rpc {
+            child, input, receiver, backlog: VecDeque::new(), next_id: 0,
+            connection_id: "connection".into(), thread_id: "thread".into(), session_id: "rpc-session".into(),
+            turn_id: Some("turn".into()), open_call: None, starting_turn: false,
+            local_session_id: None, store: store.clone(),
+        };
+        let call = json!({"id":"server-rpc","method":"item/tool/call","params":{"threadId":"thread","turnId":"turn","callId":"call"}});
+        rpc.open_call = Some(call.clone());
+        let envelope = json!({"kind":"arch_review_delivery","archReview":{"status":"success","answer":"review"},"latestUserRequirements":{"messages":[]},"reviewIsStale":false});
+        rpc.resolve_once(&call, envelope.clone(), true).await.unwrap();
+        let wire = timeout(Duration::from_secs(10), rpc.receiver.recv()).await.unwrap().unwrap();
+        assert_eq!(wire["id"], "server-rpc");
+        assert_eq!(wire["result"]["success"], true);
+        assert_eq!(serde_json::from_str::<Value>(wire["result"]["contentItems"][0]["text"].as_str().unwrap()).unwrap(), envelope);
+        assert!(rpc.resolve_once(&call, json!({}), true).await.unwrap_err().contains("중복 응답"));
+        let state = |key: &str| -> String {
+            store.db.lock().unwrap().query_row("SELECT state FROM tool_deliveries WHERE call_key=?1", [key], |r| r.get(0)).unwrap()
+        };
+        assert_eq!(state("connection:thread:\"turn\":call"), "sent");
+        rpc.confirm_tool(&json!({"id":"call","success":true})).unwrap();
+        assert_eq!(state("connection:thread:\"turn\":call"), "confirmed");
+        let writes: i64 = store.db.lock().unwrap().query_row("SELECT COUNT(*) FROM audit WHERE kind='codex_tx'", [], |r| r.get(0)).unwrap();
+        assert_eq!(writes, 1);
+        rpc.input = None;
+        let failed_call = json!({"id":"server-rpc-2","params":{"threadId":"thread","turnId":"turn","callId":"call-2"}});
+        assert!(rpc.resolve_once(&failed_call, json!({"archReview":{"status":"failed"}}), false).await.is_err());
+        assert_eq!(state("connection:thread:\"turn\":call-2"), "unknown");
+        let writes_after: i64 = store.db.lock().unwrap().query_row("SELECT COUNT(*) FROM audit WHERE kind='codex_tx'", [], |r| r.get(0)).unwrap();
+        assert_eq!(writes_after, 2); // The second write was attempted; delivery was not confirmed.
+    }
     #[test]
     fn timeout_range_is_enforced() {
         assert_eq!(parse_arch_timeout("120").unwrap(), 120);

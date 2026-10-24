@@ -26,7 +26,7 @@ def main():
         assert m['sameThread'] and m['optionsMatch'] and m['invalidRejected']
         assert m['firstModel'] != m['secondModel']
         db = sqlite3.connect(data/'chat.sqlite')
-        assert db.execute('PRAGMA user_version').fetchone()[0] == 4
+        assert db.execute('PRAGMA user_version').fetchone()[0] == 5
         audit = [{'sequence':r[0],'kind':r[1],'payload':json.loads(r[2])} for r in db.execute('SELECT sequence,kind,payload FROM audit ORDER BY sequence')]
         verify.write('audit.json',audit)
         tx = [a['payload']['params'] for a in audit if a['kind']=='codex_tx' and a['payload'].get('method')=='turn/start']

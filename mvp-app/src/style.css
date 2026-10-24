@@ -146,8 +146,8 @@ input:focus, select:focus, textarea:focus { outline: none; }
 .markdown-body h1, .markdown-body h2, .markdown-body h3, .markdown-body h4, .markdown-body h5, .markdown-body h6 { color: #edf3fc; font-weight: 650; line-height: 1.45; margin: 14px 0 7px; }
 .markdown-body h1 { font-size: 18px; }
 .markdown-body h2 { font-size: 16px; }
-.markdown-body h3 { font-size: 14px; }
-.markdown-body h4, .markdown-body h5, .markdown-body h6 { font-size: 13px; }
+.markdown-body h3 { font-size: 15px; }
+.markdown-body h4, .markdown-body h5, .markdown-body h6 { font-size: 14px; }
 .markdown-body strong { font-weight: 650; color: #edf3fc; }
 .markdown-body ul, .markdown-body ol { margin: 10px 0; padding-left: 25px; }
 .markdown-body ul { list-style: disc; }

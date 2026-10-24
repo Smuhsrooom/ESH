@@ -1,6 +1,113 @@
 # ESH 진행 상태와 개발 인계
 
+## 등록 역할과 활성 역할 구분 (2026-10-24)
+
+- 기존 SQLite `agent_instances.role`은 희망 역할로 그대로 읽고 저장해. `list_agent_instances`의 응답에 계산된 `activeRole`을 추가했어. builtin 인스턴스의 ID·연결 방식·역할·capability가 실제 등록 Adapter와 모두 맞을 때만 `lead` 또는 `reviewer`를 반환하고, 실행 어댑터가 없는 사용자 등록은 `null`이야. DB 스키마·사용자 기록·worker·Blocking Delegation은 변경하지 않았어.
+- Agents 추가 폼과 등록 상세에는 `희망 역할`, 상세에는 별도 `활성 역할`을 표시해. 새 CLI 후보가 Lead를 희망해도 활성 역할은 `없음`으로 보여. Codex/Antigravity의 활성 역할은 각각 Lead/Reviewer로 표시해. 기존 등록 행과 경로는 그대로 유지해.
+- `npm test` 41개 통과(기존 40개 + 역할 판정 회귀 1개). 첫 `npm run build:desktop`은 프런트 빌드 통과 후 실행 중인 ESH 앱(PID 15960)의 EXE 잠금으로 실패했어. 사용자가 앱을 닫은 뒤 같은 이름의 최종 EXE 빌드가 통과했어. 실제 WebView 등록 검사 `mvp-app/evidence/registry-20261024-223117/result.json`에서 builtin Codex 활성 Lead, 미지원 신규 인스턴스의 희망 Lead/활성 없음, 등록·해제, 대화 snapshot·보호 설정 보존을 확인했어. 이 UI 검사는 실제 AI 턴을 실행하지 않았어.
+
+## 테스트 전용 Mock Agent 확장 검증 (2026-10-24)
+
+- `mvp-app/src-tauri/src/mock_agent.rs`를 `#[cfg(test)]`로만 연결했어. 고유 ID `mock_agent`, 테스트 전용 in-process 연결 방식, Lead/Reviewer 역할과 기능 계약을 갖고 실제 CLI·API를 호출하지 않아. 격리 테스트 DB에만 `mock-reviewer`/`mock-lead` 인스턴스를 넣어 Registry 연결을 확인해. 운영 `registered()`와 기본 Agents 목록은 Codex/Antigravity 두 개 그대로야. 단일 worker 및 Blocking Delegation 실행 경로는 변경하지 않았어.
+- Mock Reviewer 성공·실패·시간 초과·대기 중 취소·잘못된 review ID를 검사했어. 잘못된 ID는 기존 Arch 구조화 결과 검증 함수를 재사용해 거부해. Mock Lead는 세션 열기, 턴 시작, 같은 열린 호출에 1회 응답, 잘못된/중복 호출 거부, 취소, 연결을 다시 만든 뒤 세션 재개를 검사했어. Mock Lead→Reviewer→원래 열린 호출의 위임 흐름에서는 다른 턴의 병렬 시작을 거부하고 원 호출 완료를 확인했어. 이는 어댑터 계약 테스트이며 실제 Codex↔Antigravity CLI 통합 성공으로 집계하지 않아.
+- 최종 `npm test`: 기존 36개와 신규 4개, 합계 40개 통과. 기본 sandbox의 첫 테스트 빌드는 Tauri `OUT_DIR` 환경 오류였고 권한 있는 재실행에서 통과했어. 프런트 빌드는 통과했지만 실행 중인 ESH 앱(PID 10840)이 처음 EXE 교체를 막았어. 사용자가 앱을 닫은 뒤 같은 이름의 `npm run build:desktop`이 통과했고, 마지막 테스트 전용 위임 검사 보강 후 재실행한 EXE 빌드도 통과했어.
+- 실제 등록 WebView 검사 `mvp-app/evidence/registry-20261024-203911/result.json`이 통과했어. 실제 CLI/WebView 통합 검사 `mvp-app/evidence/panels-20261024-203930/result.json`도 통과했어. Codex의 같은 턴에서 Antigravity 리뷰 2회가 성공하고 열린 호출별 응답 1회·도구 완료 1회, `tool_deliveries=confirmed`, 턴 재개와 재시작 기록 복원을 확인했어. 두 실제 검사는 마지막 테스트 전용 Mock 위임 검사 추가 직전의 빌드에서 실행했고, 추가 후 최종 빌드가 통과했어. 이 실제 CLI 결과는 Mock 40개 테스트와 별도로 집계해. 새로운 Mock Agent 자체는 실제 API 호출을 하지 않았어.
+- 등록 UI는 실행 어댑터가 없는 후보도 `Lead`/`Reviewer`를 선택해 저장해. `connection_kind=not_configured`, `support=unsupported`라 실행은 차단되지만 선택한 역할이 활성화된 듯 보일 수 있어. 최소 변경안은 등록 시 역할을 **희망 역할**로 명시하고, 활성 역할은 어댑터가 연결돼 capability·연결 방식·검증 상태를 충족할 때만 별도 표시·선택 가능하게 하는 거야. 기존 SQLite `role` 값은 희망 역할로 해석해 보존하고, 먼저 UI 문구/표시와 백엔드 활성화 판정을 분리하면 마이그레이션 없이 시작할 수 있어. 이번 작업에서는 등록 UI·DB를 바꾸지 않았어.
+
+## 기본 경로·OpenCode 재검사 (2026-10-24)
+
+- 현재 EXE의 실제 Tauri WebView 등록 검사는 `mvp-app/evidence/registry-20261024-202531/result.json`에서 통과했어. 설치된 Claude/OpenCode의 CLI 경로와 미설치 Gemini의 제안 경로, 등록·해제, 대화 snapshot 및 보호 설정 보존을 확인했어. 첫 격리 실행은 OS 접근 거부로 probe 제한 시간을 넘겼고, 권한 있는 재실행은 통과했어. 이 UI 검사는 실제 AI 턴을 실행하지 않아.
+- `npm test`는 36개 모두 통과했어. 사용자가 현재 등록한 OpenCode 인스턴스는 읽기 전용 DB 확인 시 npm CLI 실행 파일 경로와 Lead 역할을 갖고 있었어. 다만 연결 방식은 여전히 `not_configured`라 ESH의 OpenCode 실행 어댑터는 없어.
+- 해당 OpenCode CLI로 별도 최소 모델 턴을 재시도했어. 모델 선택까지 진행한 뒤 `Cannot connect to API: Unable to connect`와 종료 코드 1로 끝나 응답을 받지 못했어. 보호 대상 인증·설정 파일 20개 항목의 해시는 전후 같아. 근거: `mvp-app/evidence/opencode-retest-20261024/result.json`. 기존 사용자 세션은 이어서 실행하지 않았어.
+- 이번 재검사에서 코드는 수정하지 않았고 EXE도 재빌드하지 않았어. OpenCode API 접속 원인과 ESH 내 OpenCode AI 턴은 아직 확인되지 않았어.
+
 확인일: 2026-10-18. 현재 실행 파일 대상은 `esh-chat-mvp4`, 패키지 버전은 `0.1.0`이야. 아래 초기 검증 표는 인계 문서 작성 당시 결과이며, 후속 수정은 별도로 기록해.
+
+## 에이전트 추가 기본 경로 제안 (2026-10-24)
+
+- 후보 선택 시 설치 파일을 찾으면 그 절대 경로를 입력칸에 넣고, 찾지 못해도 Claude `~/.local/bin/claude.exe`, Gemini `%APPDATA%/npm/gemini.cmd`, OpenCode `%APPDATA%/npm/node_modules/opencode-ai/bin/opencode.exe`를 제안해. 제안 경로의 파일이 없으면 설치 상태는 계속 `미설치`야. OpenCode 데스크톱 `OpenCode.exe`는 CLI 기본 경로로 사용하지 않아.
+- Gemini의 알려진 npm `gemini.cmd`는 경로 등록만 허용하고 실행 연결은 추가하지 않았어. 후보 탐지에서는 어떤 CLI나 셸 스크립트도 실행하지 않아. 기존 사용자 등록 행·설정·SQLite 스키마·worker·Blocking Delegation은 변경하지 않았어.
+- `npm test` 36개 통과(기존 35개 + 기본 경로·Gemini npm shim 검사 1개). 동일 이름의 `npm run build:desktop` 통과. 첫 EXE 교체는 실행 중인 앱의 잠금으로 실패했고 사용자가 닫은 뒤 성공했어. 최종 EXE의 실제 WebView `mvp-app/evidence/registry-20261024-202133/result.json`에서 Claude·OpenCode 설치 경로, 미설치 Gemini 기본 경로의 입력칸 반영, 기존 등록·중복 거부·해제와 대화 snapshot/설정 보존을 확인했어. 실제 AI 턴은 이번 UI 검사에서 실행하지 않았어.
+
+## OpenCode 연결 확인 (2026-10-24)
+
+- 사용자 DB를 읽기 전용으로 확인했어. `opencode`/Reviewer 인스턴스가 등록돼 있고 경로는 OpenCode 데스크톱 `OpenCode.exe` 1.18.21.0이야. `connection_kind=not_configured`이며 현재 ESH에 OpenCode 실행 어댑터는 없어. 따라서 등록 상태는 ESH의 실제 AI 연결 성공을 뜻하지 않아.
+- 별도 npm OpenCode CLI 1.18.34의 `--version`/`--help`는 성공했어. 실제 `run --pure` 최소 응답 요청은 기본 모델 선택 후 `Cannot connect to API: Unable to connect`로 종료 코드 1이었어. 첫 기본 샌드박스 시도는 CLI 로그 경로 접근 차단으로 모델 호출 전에 실패했고, 일반 실행 권한에서 다시 시도한 결과가 API 연결 실패야. 인증·설정 파일 해시는 전후 동일했어. 근거: `mvp-app/evidence/opencode-smoke-20261024/result.json`.
+- 미확인: OpenCode 데스크톱 앱 자체의 모델 응답과 ESH 내 OpenCode 턴 실행. 현재 구현 범위에는 두 실행 경로가 없어 이번 검사에서 성공으로 집계하지 않아.
+
+## Agents 안전 탐지·등록 (2026-10-24)
+
+- `registry.rs`에 Claude Code(`claude.exe`), Gemini CLI(`gemini.exe`), OpenCode(`opencode.exe`)의 PATH 파일 탐지와 절대 경로 수동 등록을 추가했어. 파일명·파일 존재를 검사할 뿐 탐지한 CLI를 실행하거나 인증 파일을 읽지 않아. 후보는 이 세 종류로 제한했고 `.cmd` 래퍼나 PATH 밖의 설치는 자동 탐지하지 않아. 수동 경로로 등록할 수 있어. 파일명 검사는 제조사 서명·진위를 증명하지 않으므로 등록된 신규 인스턴스는 `미지원`/`설정 필요`로 표시하고 실행 경로에 연결하지 않아.
+- SQLite v4→v5에 `agent_instances` 테이블을 추가해 provider·고유 instance ID·connection·role·경로를 분리했어. Codex·Antigravity builtin 행을 만들되 기존 `agents` 실행 상태, 세션·메시지·`tool_deliveries`를 옮기거나 삭제하지 않아. 중복 provider/정규화 경로는 거부하고 등록 해제는 사용자 행만 지워. 실행 파일과 기존 설정은 건드리지 않아. `AgentsView.tsx`에 추가·수동 경로·등록 해제와 설치/인증/실행 가능/실행 상태 분리 표시를 추가했어. Engine의 단일 worker·Blocking Delegation 코드는 변경하지 않았어.
+- `npm test` **35개 통과**(기존 32개 + 탐지/등록/마이그레이션 3개). v4 기록을 가진 DB의 v5 추가, 잘못된 경로·미설치·중복·허용되지 않은 provider·등록 해제·재시작 복원과 기존 세션 전환/취소/압축/위임 회귀를 검사했어. 같은 이름의 `npm run build:desktop` 통과. 첫 빌드는 실행 중인 EXE 잠금으로 실패했고 사용자가 앱을 닫은 뒤 성공했어.
+- 최종 EXE 실제 WebView 등록 검사: `mvp-app/evidence/registry-20261024-200610/result.json`. 설치/미설치 후보 목록, 수동 경로 등록, 신규 인스턴스 미지원·ID 표시, 중복 거부, 등록 해제, fixture 파일·대화 snapshot 보존, schema v5를 확인했어. 앞선 `registry-20261024-195717` 실패는 검증 드라이버가 Agents 화면에 남아 공통 오른쪽 패널 크기 검사를 수행한 탓이었고 UI 동작 실패는 아니야. 드라이버 동선을 고친 후 통과했어.
+- 실제 WebView/CLI 회귀: 최종 실행 상태 문구 정리 직전의 동일 Rust 코드 EXE에서 `mvp-app/evidence/panels-20261024-200403/result.json`은 같은 턴의 Arch 리뷰 2회와 호출별 도구 응답 1회·`confirmed`를 통과했어. `mvp-app/evidence/panels-20261024-195755/result.json`은 기존 Agents 점검 화면, `mvp-app/evidence/workspace-20261024-195951/result.json`은 A→B→A·세션 재개·기록 복원, `mvp-app/evidence/cancel-20261024-200112/result.json`은 턴/위임 취소, `mvp-app/evidence/compact-20261024-200131/result.json`은 수동 압축 완료를 통과했어. 마지막 변경 후 최종 EXE의 등록 WebView 검사는 다시 통과했어. 이 결과는 실제 CLI 응답이며 신규 CLI 실행 검사는 아니야.
+- 확인 한계: 후보 설치 판정은 실행 파일 존재만 뜻하고 인증·실제 실행 가능 여부는 확인하지 않아 `unknown` 또는 `미지원`으로 표시해. 비정상 종료를 포함한 도구 응답 exactly-once는 보장·검증하지 않았어.
+
+## Agents 중앙 관리 화면 배치 (2026-10-23)
+
+- 사이드바의 `대화`·`에이전트` 메뉴와 최근 세션 탐색은 유지하고, 기존 사이드바 내부 상태 카드를 중앙 `AgentsView.tsx`의 에이전트 목록·선택 상세 화면으로 옮겼어. 상세에는 기존 설치·인증·실행 가능·실행 상태, 연결 방식, 점검 시각·실패 사유와 활성 세션·실행 ID를 그대로 사용해. 새 에이전트 연결·프로필·상단 탭은 추가하지 않았어.
+- `main.tsx`의 중앙 컨테이너를 고정하고 대화 DOM을 전환 중에도 유지해 세션·스크롤·컴포저 상태를 보존해. Agents를 표시할 때 오른쪽 협업 패널과 리사이저를 화면에서만 숨기고 그 너비를 중앙에 줘. `v0.css`/`themes.css`는 기존 테마 색과 컴포넌트 톤으로 목록·상세를 배치했어. Rust·SQLite·단일 worker·Blocking Delegation 코드는 변경하지 않았어.
+- `npm run build`와 동일 이름의 `npm run build:desktop` 통과. 첫 두 EXE 빌드는 사용 중인 실행 파일 잠금으로 실패했고 사용자가 앱을 닫은 뒤 성공했어. 최종 EXE 실제 WebView `mvp-app/evidence/panels-20261023-233134/result.json`에서 중앙 목록·상세, 오른쪽 패널 숨김, 남은 너비 사용, 대화 복귀 후 스크롤 위치, 설치/미설치·수동 새로고침·snapshot 보존을 확인했어.
+- 같은 EXE의 실제 CLI/WebView `mvp-app/evidence/cancel-20261023-233153/result.json`은 실행 중 Agents 전환·새로고침 후 같은 세션·실행 ID와 연결/thread 복구를 확인했어. `mvp-app/evidence/panels-20261023-233220/result.json`은 Codex→Antigravity→Codex의 같은 턴 리뷰 2회, 호출당 응답 1회와 `tool_deliveries confirmed`를 통과했어. 두 검사는 Mock AI 응답이 아니야.
+
+## Agents 상태 점검·관리 화면 3단계 (2026-10-23)
+
+- `agents.rs`의 두 어댑터가 기존 실행 파일 탐색 경로를 읽기 전용으로 확인해 설치됨·미설치·점검 실패를 구분해. CLI 실행, 모델 턴, 인증 파일 읽기·수정, 기존 RPC 연결 조작은 하지 않아. 인증은 안전한 비대화식 확인 수단이 없어 `unknown`, 설치돼도 실행 가능은 `unknown`이야. 미설치면 실행 불가, 파일 확인 실패면 점검 실패로 표시해.
+- `probe_agents`는 ID·연결 방식, 설치·인증·실행 가능 상태, 점검 시각·실패 사유를 별도 응답으로 반환해. Agents 화면은 처음 열 때와 수동 새로고침 때 조회하며 `점검 전`·`점검 중`도 표시해. 기존 snapshot의 실행 상태는 별도 필드로 유지하고, 활성 상태에는 `activeRun`의 세션·실행 ID를 연결해. probe 결과는 화면 메모리에만 있고 SQLite v4와 기존 `agents` 행, 세션·메시지·`tool_deliveries`는 변경하지 않았어.
+- `npm test`: 기존 **29개 + 신규 3개 = 32개 통과**. 설치됨/미설치/파일 검사 오류, 인증·실행 가능 상태의 독립성, 점검 전후 SQLite 기록 보존을 검사했어. `npm run build:desktop`은 프런트와 동일 이름의 `esh-chat-mvp4.exe` 빌드에 통과했어. 처음 두 빌드는 실행 중 EXE 파일 잠금으로 실패했고 사용자가 앱을 닫은 뒤 다시 빌드했어.
+- 최종 EXE 실제 WebView `mvp-app/evidence/panels-20261023-231826/result.json`: Codex·Antigravity 설치됨/인증 불명/실행 가능 불명, Antigravity 미설치 override의 실행 불가·실패 사유, `점검 중` 표시와 수동 새로고침, 점검 전후 snapshot 및 SQLite schema v4 보존을 확인했어. 실제 모델 응답은 이 검사에서 사용하지 않았어.
+- 최종 화면 검사 직전의 동일 실행 코드 EXE에서 실제 CLI/WebView `mvp-app/evidence/cancel-20261023-231441/result.json`은 실행 중 새로고침 후 세션·실행 ID 유지와 턴/위임 중 취소·복구를 통과했어. `mvp-app/evidence/panels-20261023-231505/result.json`은 같은 턴의 Arch 2회와 호출당 wire 응답 1회·`confirmed`, `mvp-app/evidence/workspace-20261023-231639/result.json`은 A→B→A 및 원본 thread 재개를 통과했어. 이후 최종 빌드에서 바뀐 코드는 debug WebView의 `점검 중` 검사뿐이야.
+- 미확인: 설치된 CLI의 인증 여부와 실행 가능 여부는 모델 턴·인증 정보 접근 없이 판정할 수 없어 `unknown`이야. 실제 권한 거부 파일의 운영체제 실패는 단위 검사에서 잘못된 경로 오류로 대체했고, 실제 CLI의 Arch 시간 초과·비정상 종료 exactly-once는 이번 범위에서 새로 검증하지 않았어.
+
+## AgentAdapter 2단계 도입 (2026-10-23)
+
+- `mvp-app/src-tauri/src/agents.rs`에 공통 `AgentAdapter`와 역할별 `LeadAdapter`/`LeadSession`/`ReviewAdapter`, `AgentCapabilities`를 추가했어. 기존 `codex`/`antigravity` ID와 연결 방식(App Server stdio JSON-RPC / agy CLI stream-json), Lead/Reviewer 역할을 각각 별도 값으로 둬. Codex의 `leadConversation`과 `toolCallBridge`도 별도 capability야. 설치·인증 점검은 아직 하지 않아 `probe=NotChecked`이며, 실제 연결 성공으로 표시하지 않아.
+- Codex 어댑터는 기존 `Rpc`를 감싸고 Antigravity 어댑터는 기존 `cli::arch`를 그대로 호출해. `Engine`의 단일 worker와 Blocking Delegation 이벤트 루프, 원래 `request_arch_review` RPC ID로 돌려주는 응답, `tool_deliveries`, 세션 전환·취소·수동 압축·SQLite 경로를 유지했어. 별도 조회용 Codex 연결도 같은 어댑터의 `connect`를 사용해. UI·스키마·기존 설정은 변경하지 않았어.
+- `npm test`: 기존 26개와 어댑터 메타데이터, Mock Lead 열린 호출 ID/중복 응답, Mock Reviewer 버전·취소 계약 3개를 합쳐 **29개 통과**. `npm run build:desktop` 통과, 같은 `esh-chat-mvp4.exe`를 갱신했어.
+- 현재 EXE의 실제 CLI/WebView 검사: `mvp-app/evidence/panels-20261023-212943/result.json`에서 같은 Codex 턴의 Arch 검토 2회, 호출당 응답·완료 event 1회, `confirmed`와 복원을 확인했어. `mvp-app/evidence/workspace-20261023-213113/result.json`에서 A→B→A·원본 재개·복사 및 기록 보존을 확인했어. `mvp-app/evidence/cancel-20261023-213221/result.json`에서 턴·위임 중 취소, `mvp-app/evidence/compact-20261023-213244/result.json`에서 수동 압축 완료와 메시지 보존을 확인했어. 모두 실제 CLI 응답이고 Mock AI 답변이 아니야.
+- 남은 범위: 설치·인증·실행 가능 상태 점검과 Agents 관리 화면은 3단계야. 이번 검사로 비정상 종료까지 포함하는 exactly-once를 주장하지 않아.
+
+## 세션 전환 시 입력 누락 수정 (2026-10-23)
+
+- `engine.rs` worker가 A의 RPC를 닫은 뒤 `continue`해 이미 꺼낸 B 입력을 잃던 경로를 고쳤어. 현재 입력의 activeRun을 연결 전환 전에 만들고, 이전 연결을 닫은 뒤 같은 입력으로 턴을 진행해. 전환 중 취소되면 새 턴을 시작하지 않아. 종료 확인 실패는 `unknown`으로 기록하고 해당 worker의 후속 입력을 `interrupted`로 남겨 새 연결을 열지 않아. 재연결 실패로 소모된 입력도 `interrupted`가 되며 자동 재실행하지 않아.
+- `store.rs`는 `turn/start` 응답에 turn ID가 있을 때 해당 사용자 메시지의 thread/turn과 `delivered`를 원자적으로 기록해. 이미 전달·취소·중단된 메시지에는 두 번째 턴 결합을 거부해. 실패한 입력의 `queued → interrupted` 역시 조건부 업데이트로 처리해, 동시에 들어온 취소의 `cancelled` 상태를 덮어쓰지 않아. 기존 스키마·세션·메시지·`tool_deliveries`를 마이그레이션하거나 초기화하지 않았어.
+- Rust `npm test` **26개 통과**. A→B→A 연결 전환, B의 다중 대기 메시지 순서, 같은 메시지 중복 턴 차단, 전환 중 취소, 연결 종료·Mock 재연결 실패의 복구 상태를 추가로 검사했어. `npm run build:desktop` 통과, 실행 대상은 같은 `esh-chat-mvp4.exe`야. 첫 빌드는 실행 중인 앱의 파일 잠금으로 실패했고 사용자가 닫은 뒤 다시 빌드했어.
+- 이전 실패는 `mvp-app/evidence/workspace-20261023-205406/result.json`으로 보존했어. 수정 후 실제 CLI/WebView `mvp-app/evidence/workspace-20261023-211114/result.json`과 최종 EXE의 `mvp-app/evidence/workspace-20261023-211601/result.json`은 A→B→A, 같은 원본 thread 재개, 격리된 세션 맥락, 복사 세션 Arch 도구 응답 1회, 재시작 후 기록 보존을 통과했어. `mvp-app/evidence/panels-20261023-211221/result.json`은 같은 Codex 턴의 Arch 2회 검토와 호출당 응답 1회·`confirmed`를, `mvp-app/evidence/cancel-20261023-211417/result.json`은 기존 위임 중 취소를 통과했어. 후자의 두 검사는 최종 실패 경로 보강 직전 EXE에서 실행했고, 최종 EXE는 세션 전환 성공 경로를 재검사했어.
+- 실제 연결 종료 실패·재연결 실패와 전환 중 취소는 Mock/단위 회귀로 검사했어. 해당 경합을 실제 CLI 프로세스 장애로 강제 재현한 결과는 아니야. 실행 결과 요약은 `mvp-app/evidence/session-switch-20261023/result.json`에 있어.
+
+## 범용 에이전트 계획 1단계: 기존 동작 특성 테스트 (2026-10-23)
+
+- [AGENT_MANAGEMENT_PLAN.md](AGENT_MANAGEMENT_PLAN.md)에 요청한 7개 계약별 단위·Mock/실제 CLI 검사와 검증 공백을 나눠 적었어. 새 에이전트 연결, DB 마이그레이션, UI 동작 변경은 하지 않았어.
+- `mvp-app/src-tauri/src/characterization_tests.rs`의 격리 SQLite 검사 3개를 추가했어. 로컬 세션별 턴·버전·thread 결합과 재시작 시 queued 입력 처리, 협업 요청·답변과 `tool_deliveries` 보존/unknown 복구, 위임 중 같은 세션의 새 요구사항과 다른 세션 입력의 분리를 확인해.
+- `mvp-app/src-tauri/src/cli.rs`에 가짜 stdio 상대를 쓰는 검사 1개를 추가했어. 원래 JSON-RPC ID에 응답하고 같은 호출의 중복 응답을 막으며, `sent → confirmed`와 전송 실패 시 `unknown`을 확인해. 이는 Mock 프로토콜 검사이며 실제 Codex/Antigravity 접속 성공이나 비정상 종료까지 포함하는 exactly-once 보장은 아니야.
+- `mvp-app/`에서 `npm test`는 Rust 21개 통과(기존 17개 + 신규 4개). 처음 기본 샌드박스의 Tauri 리소스 빌드는 Windows 액세스 거부였고, 권한 경계 밖 재실행에서 통과했어. 첫 `npm run build:desktop`은 프런트 빌드 뒤 실행 중인 PID 49604의 `esh-chat-mvp4.exe` 잠금으로 실패했어. 사용자가 앱을 닫은 뒤 같은 이름으로 재실행한 데스크톱 빌드는 통과했어. 별도 exe를 만들지 않았어. 결과 요약: `mvp-app/evidence/agent-baseline-20261023/result.json`.
+- 현재 빌드의 실제 CLI/WebView 검사: `mvp-app/evidence/panels-20261023-205145/result.json`은 Codex → Arch 2회 검토 → 같은 thread/turn 재개, 호출당 wire 응답 1회와 완료 event, `confirmed`, 재시작 기록 복원, CLI 부재 오류를 통과했어. `mvp-app/evidence/cancel-20261023-205346/result.json`은 위임 중 취소와 Arch 프로세스 종료, 열린 호출 취소 응답 1회, 같은 연결 복구를 통과했어. `mvp-app/evidence/compact-20261023-210026/result.json`은 실제 수동 압축 요청 1회, 일치하는 item ID, 완료와 메시지 보존을 통과했어. `mvp-app/evidence/panels-final-20261023-210046/result.json`은 기존 실제 CLI 대화의 격리 복원과 구버전 기록 보존을 통과했어.
+- **실패:** `mvp-app/evidence/workspace-20261023-205406/result.json`은 새 세션 B의 입력을 보낸 뒤 GUI probe 제한 시간을 넘겼어. 격리 DB에는 B 입력이 `queued`로 남고 B의 `turn/start`는 없어. `engine.rs` worker가 A의 RPC를 닫은 후 `continue`하여 이미 `rx.recv()`로 꺼낸 B 입력을 다시 처리하지 않는 경로와 일치해. 따라서 실제 세션 전환·재개 회귀는 통과로 집계하지 않아. 기존 동작을 바꾸려면 이전 RPC를 정상 종료한 다음 **같은 Input**으로 다음 실행을 이어가도록 하고, 세션 A/B/A 순서·큐·중단·열린 도구 정리까지 회귀 검증해야 해. 이번 테스트 단계에서는 실행 코드를 고치지 않았어.
+- 실제 Arch 제한 시간 강제 경과와 실제 CLI의 수동 압축 실패·시간 초과는 검증 공백이야. 이전 증거를 이번 성공으로 집계하지 않아.
+- 발견한 변경 후보: `Store::tool_state`는 없는 전달 키를 갱신해도 성공을 돌려줘. 향후 provider/adapter가 추가되면 잘못된 호출 확인을 놓칠 수 있어. 또 `codex_tx` audit은 실제 stdio 쓰기 전에 남아서, 그 개수만으로 wire 전달 횟수를 증명할 수 없어. 이번 단계에서는 동작을 바꾸지 않았고, 수정 시 기존 `unknown` 복구 및 `confirmed` 경로와의 호환성을 먼저 검사해야 해.
+
+## 중앙 대화 머리말·시간·구분선 정리 (2026-10-23)
+
+- 중앙 Codex 답변 위의 `Codex · Lead` 머리말을 제거하고 사용자·Codex 메시지의 시간을 각각 본문 아래로 옮겼어. 사용자 메시지 바로 다음에 Codex 답변이 나올 때만 `<hr>` 구분선을 표시해. 사용자 말풍선과 오른쪽 협업 기록의 머리말·카드는 유지해.
+- `npm run build`와 같은 `esh-chat-mvp4.exe`의 `npm run build:desktop` 통과. 실제 Tauri WebView 합성 마크다운 검사 `mvp-app/evidence/markdown-20261023-203238/result.json`에서 중앙 머리말 제거·본문 아래 시간·사용자 다음 답변의 구분선·말풍선 구별·협업 카드 유지와 원문 보존을 확인했어. 격리 복원 검사 `mvp-app/evidence/panels-final-20261023-203247/result.json`에서 기존 실제 CLI 대화 6개와 구버전 기록 4개, 패널 읽기 전용·크기 조절을 확인했어. 새 AI 요청은 보내지 않았어.
+
+## Codex 답변 문서형 표시 (2026-10-23)
+
+- 중앙 Codex 답변 본문의 배경·테두리·모서리·안쪽 여백을 없애 문서처럼 표시해. 마크다운 글자 크기와 코드 블록 구분은 유지하고, 사용자 메시지 말풍선과 오른쪽 협업 기록 카드에는 적용하지 않았어. Rust·SQLite·에이전트 연결은 변경하지 않았어.
+- `npm run build`와 동일한 `esh-chat-mvp4.exe`의 `npm run build:desktop` 통과. 실제 Tauri WebView 합성 마크다운 검사 `mvp-app/evidence/markdown-20261023-202825/result.json`에서 중앙 본문의 투명 배경·테두리 0·안쪽 여백 0, 협업 카드 유지, 마크다운 내용·원문 보존을 확인했어. 저장된 실제 CLI 대화의 격리 복원 검사 `mvp-app/evidence/panels-final-20261023-202834/result.json`에서 메시지 6개·구버전 기록 4개 보존과 협업 패널 읽기 전용·크기 조절을 확인했어. 새 AI 요청은 보내지 않았어.
+
+## 대화·협업 패널 가독성 정리 (2026-10-23)
+
+- 협업 패널은 검토 기록이 없는 세션에서 처음에는 접혀 있고 기록이 생기면 열려. 사용자가 직접 접고 펼친 뒤에는 자동 전환하지 않아. 목록 기본 폭은 360px, 상세는 560px로 따로 저장해. 기존에 저장된 600px 이하의 넓은 목록 폭은 한 번 360px로 옮기고 이후 조절 값은 유지해. 중앙 헤더의 검토 버튼으로 언제든 패널을 열 수 있어.
+- 중앙 대화·입력 글자는 14px, 협업 상세는 13px로 조정하고 중앙 대화/입력 폭을 760px로 넓혔어. 협업 상세 표의 강제 620px 최소 폭을 없애고 셀 내용을 줄바꿈해. 큰 검토 카드와 중복 영어 섹션 제목을 줄였고, 작동하지 않는 파일 첨부 버튼을 화면에서 제거했어. 모델·추론 선택, 컨텍스트 팝업·압축, 전송, 협업 스레드 목록·상세 기능은 유지해.
+- `npm run build:desktop` 통과. 최종 실제 Tauri WebView 복원 검사 `mvp-app/evidence/panels-final-20261023-202442/result.json`에서 저장된 실제 CLI 대화 6개·구버전 기록 4개 보존, 목록·상세 전환, 읽기 전용, 패널 크기 조절을 확인했어. `mvp-app/evidence/panels-20261023-202424/result.json`에서 빈 세션의 협업 패널 초기 접힘과 세 테마를 확인했어. 합성 마크다운 검사 `mvp-app/evidence/markdown-20261023-202432/result.json`에서 중앙 14px·협업 13px, 협업 표 줄바꿈·코드 스크롤·원문 보존을 확인했어. 이번 변경에서는 새 AI 요청을 보내지 않았어.
+
+## 기본 UI 팔레트와 테마 선택 (2026-10-23)
+
+- 왼쪽 하단 워크스페이스 메뉴에 기본·라일락·클래식 테마를 추가했어. 기본 테마는 사용자가 지정한 `#202020` 배경·`#292929` 서피스·`#3B3B3B` 경계선·`#E5E5E5` 텍스트·`#A1A1A1` 보조 텍스트·`#8EADEB` 강조색이야. 라일락과 클래식의 지정 색도 `src/themes.css`에 그대로 반영했어. 사용자가 지정하지 않은 보조 텍스트·경계선·호버색은 각 팔레트에서 `color-mix`로 파생해.
+- 테마 선택은 `esh.ui-theme` localStorage에 저장하고 다음 실행에서 렌더링 전에 적용해. 색상은 탐색기·중앙 대화·협업 패널·입력창·팝업·마크다운에 적용해. Rust, SQLite 스키마, CLI/협업 경로는 변경하지 않았어.
+- `npm run build`와 같은 `esh-chat-mvp4.exe`의 `npm run build:desktop` 통과. 실제 Tauri WebView 검사 `mvp-app/evidence/panels-20261023-194332/result.json`에서 세 테마의 지정 CSS 팔레트 값, 중앙 배경·입력창 서피스·전송 강조색의 계산 결과, 선택 표시와 localStorage 저장을 확인했어. 검사는 격리된 DB를 사용하고 AI 요청을 보내지 않았어. 테마 초기 검사의 렌더링 대기·전환 측정 오류는 `panels-20261023-194158`과 `panels-20261023-194223`에 실패 기록으로 보존했어.
 
 ## 임시 앱 아이콘 제거·프로그램 존댓말 (2026-10-23)
 
@@ -272,6 +379,7 @@ Rust 7개 검사는 timeout 설정 범위, 오래되거나 빈 Arch 구조화 �
 2. **다음 기능 후보(미구현):** 압축 실패·unknown 복구 UX와 재시도 안내. 수동 압축 버튼, 사용량·압축 상태 표시, 모델 목록·추론 선택과 세션별 저장은 구현했어. 새로운 API 연결은 당시 설치 프로토콜로 다시 확인해.
 3. **기능에 맞춘 UI 정리:** 기존 탐색기·중앙 대화·오른쪽 협업 구분을 유지하며 설정 위치, 실행 대상 세션·오류·중단 표시를 정돈해.
 4. **개발 도구 확장:** 실제 작업 폴더, 권한·승인, 프로세스 관리가 정해진 뒤 파일 수정·터미널·diff·Git worktree를 단계적으로 추가해.
+5. **범용 에이전트 관리:** [단계별 설계 계획](AGENT_MANAGEMENT_PLAN.md)에 현재 코드 근거, `AgentAdapter`/`AgentCapabilities`, 설치·인증·실행 가능·현재 실행의 분리, Agents 화면 흐름, Blocking Delegation·SQLite 호환성, Mock Agent 검증을 정리했어. 계획만 기록했고 구현·마이그레이션·실행 검증은 아직 하지 않았어.
 
 Codex Desktop과의 기능 동등성이나 출시 일정은 확정하지 않았어. 현재 검증된 대화 MVP에서 확장하는 순서이며, 공개 프로토콜 지원과 추가 구현이 필요한 범위를 구분해야 해.
 

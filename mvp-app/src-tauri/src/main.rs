@@ -1,5 +1,9 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 mod cli;
+mod agents;
+#[cfg(test)]
+mod mock_agent;
+mod registry;
 mod engine;
 mod models;
 mod store;
@@ -7,7 +11,10 @@ mod stream;
 mod context;
 mod workspace;
 mod window_state;
+#[cfg(test)]
+mod characterization_tests;
 
+use agents::{registered, AgentProbe, LeadAdapter, LeadSession, CODEX};
 use engine::Engine;
 use serde_json::Value;
 use std::{
@@ -26,15 +33,38 @@ fn get_snapshot(engine: tauri::State<'_, Arc<Engine>>) -> Result<Snapshot> {
 }
 
 #[tauri::command]
+fn probe_agents() -> Vec<AgentProbe> {
+    registered().iter().map(|agent| agent.probe()).collect()
+}
+
+#[tauri::command]
+fn detect_agent_candidates() -> Vec<registry::Candidate> { registry::discover() }
+
+#[tauri::command]
+fn list_agent_instances(engine: tauri::State<'_, Arc<Engine>>) -> Result<Vec<registry::Instance>> {
+    engine.store.list_agent_instances()
+}
+
+#[tauri::command]
+fn register_agent_instance(provider: String, path: String, role: String, engine: tauri::State<'_, Arc<Engine>>) -> Result<registry::Instance> {
+    engine.store.register_agent_instance(&provider, &path, &role)
+}
+
+#[tauri::command]
+fn unregister_agent_instance(id: String, engine: tauri::State<'_, Arc<Engine>>) -> Result<()> {
+    engine.store.unregister_agent_instance(&id)
+}
+
+#[tauri::command]
 fn cancel_run(session_id: String, run_id: String, engine: tauri::State<'_, Arc<Engine>>) -> Result<Snapshot> {
     engine.cancel(&session_id, &run_id)
 }
 
 #[tauri::command]
 async fn list_codex_models(engine: tauri::State<'_, Arc<Engine>>) -> Result<Vec<models::CodexModel>> {
-    let mut rpc = cli::Rpc::start(engine.store.clone()).await?;
+    let mut rpc = CODEX.connect(engine.store.clone()).await?;
     let result = async { rpc.handshake().await?; rpc.list_models().await }.await;
-    let closed = rpc.close().await;
+    let closed = LeadSession::close(&mut rpc).await;
     let models = result?;
     closed?;
     engine.cache_models(models.clone())?;
@@ -83,13 +113,13 @@ async fn list_codex_sessions(
     search: Option<String>,
     engine: tauri::State<'_, Arc<Engine>>,
 ) -> Result<Value> {
-    let mut rpc = cli::Rpc::start(engine.store.clone()).await?;
+    let mut rpc = CODEX.connect(engine.store.clone()).await?;
     let result = async {
         rpc.handshake().await?;
         rpc.list_threads(cursor, search).await
     }
     .await;
-    let closed = rpc.close().await;
+    let closed = LeadSession::close(&mut rpc).await;
     match result {
         Ok(v) => {
             closed?;
@@ -109,13 +139,13 @@ async fn import_codex_session(
     if mode != "copy" && mode != "resume" {
         return Err("가져오기 방식을 선택해 주세요".into());
     }
-    let mut rpc = cli::Rpc::start(engine.store.clone()).await?;
+    let mut rpc = CODEX.connect(engine.store.clone()).await?;
     let result = async {
         rpc.handshake().await?;
         rpc.read_history(&thread_id).await
     }
     .await;
-    let _ = rpc.close().await;
+    let _ = LeadSession::close(&mut rpc).await;
     let (thread, mut history) = result?;
     let snapshot = engine.store.snapshot()?;
     if let Some(local) = snapshot
@@ -144,6 +174,13 @@ fn get_probe_mode() -> Option<String> {
     } else {
         None
     }
+}
+
+#[tauri::command]
+fn get_registry_probe_path() -> Option<String> {
+    if cfg!(debug_assertions) && std::env::var_os("ESH_GUI_PROBE").as_deref() == Some(std::ffi::OsStr::new("registry")) {
+        std::env::var("ESH_REGISTRY_PROBE_EXE").ok()
+    } else { None }
 }
 
 // Only active in debug test launches; records what the real WebView rendered.
@@ -188,6 +225,11 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             get_snapshot,
+            probe_agents,
+            detect_agent_candidates,
+            list_agent_instances,
+            register_agent_instance,
+            unregister_agent_instance,
             cancel_run,
             list_codex_models,
             compact_session,
@@ -198,6 +240,7 @@ fn main() {
             list_codex_sessions,
             import_codex_session,
             get_probe_mode,
+            get_registry_probe_path,
             record_gui_probe,
             close_probe
         ])

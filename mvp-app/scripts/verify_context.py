@@ -17,7 +17,7 @@ def main():
         db=sqlite3.connect(data/'chat.sqlite')
         rows=[{'sequence':n,'kind':k,'payload':json.loads(p)} for n,k,p in db.execute('SELECT sequence,kind,payload FROM audit ORDER BY sequence')]
         verify.write('audit.json',rows)
-        assert db.execute('PRAGMA user_version').fetchone()[0]==4
+        assert db.execute('PRAGMA user_version').fetchone()[0]==5
         db.close()
         usage=[r['payload']['params']['tokenUsage'] for r in rows if r['kind']=='codex_rx' and r['payload'].get('method')=='thread/tokenUsage/updated' and r['payload']['params']['threadId']==state['threadId']]
         assert usage and usage[-1]['modelContextWindow']==state['usage']['modelContextWindow']

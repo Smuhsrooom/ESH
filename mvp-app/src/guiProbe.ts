@@ -141,6 +141,16 @@ async function cancellationProbe() {
   const thread = s.sessions.find(s => s.id === session.id)!.threadId;
   const button = () => document.querySelector<HTMLButtonElement>('[data-action="stop-run"]')!;
   if (!button() || button().disabled) throw new Error('실행 중 중단 버튼이 없어');
+  document.querySelector<HTMLButtonElement>('[data-action="agents-tab"]')!.click();
+  await until(() => { const node = document.querySelector<HTMLElement>('[data-agent="codex"]'); return !!node && node.dataset.installation !== 'not_checked'; }, 10);
+  const liveAgent = document.querySelector<HTMLElement>('[data-agent="codex"]')!;
+  if (liveAgent.dataset.runId !== normalRun || liveAgent.dataset.sessionId !== session.id) throw new Error('Agents 실행 상태가 현재 세션·실행 ID와 달라');
+  document.querySelector<HTMLButtonElement>('[data-action="refresh-agents"]')!.click();
+  await wait(100);
+  const duringProbe = await invoke<Snapshot>('get_snapshot');
+  if (duringProbe.activeRun?.id !== normalRun || duringProbe.activeRun.sessionId !== session.id) throw new Error('상태 점검 중 현재 실행이 바뀌었어');
+  document.querySelector<HTMLButtonElement>('[data-action="chat-tab"]')!.click();
+  await wait(80);
   button().click();
   await until(async () => { s = await invoke<Snapshot>('get_snapshot'); return !s.activeRun && s.agents.find(a => a.id === 'codex')?.status === 'cancelled'; }, 90);
   await sendAndWait('이전 긴 출력 요청은 취소했어. 도구 없이 CANCEL_RECOVERY_OK만 포함해 한 문장으로 답해.', 'CANCEL_RECOVERY_OK', session.id);
@@ -293,8 +303,48 @@ export async function runGuiProbe(mode: string) {
   let contextUsage: unknown = null;
   let compact: unknown = null;
   let focusFeedback: unknown = null;
+  let themeSelection: unknown = null;
+  let reviewLayout: unknown = null;
+  let agentStatus: unknown = null;
+  let registryStatus: unknown = null;
   try {
-    if (mode === 'compact') {
+    if (mode === 'theme') {
+      const original = localStorage.getItem('esh.ui-theme');
+      const emptyPanelInitiallyClosed = document.querySelector<HTMLElement>('[data-panel="collaboration"]')!.getBoundingClientRect().width === 0;
+      if (!emptyPanelInitiallyClosed) throw new Error('검토 기록이 없는 새 세션에서 협업 패널이 접히지 않았어');
+      const menuButton = document.querySelector<HTMLButtonElement>('[aria-label="워크스페이스 메뉴"]')!;
+      const samples: { id: string; background: string; surface: string; accent: string }[] = [];
+      const cases = [
+        { id: 'slate', background: '#202020', surface: '#292929', border: '#3B3B3B', text: '#E5E5E5', muted: '#A1A1A1', accent: '#8EADEB', secondary: '#8EADEB', tertiary: '#8EADEB' },
+        { id: 'lilac', background: '#101010', surface: '#1C1C1C', border: '#363238', text: '#E4E0E5', accent: '#C6A0F6', secondary: '#F29BC1', tertiary: '#F29BC1' },
+        { id: 'classic', background: '#2B2B2B', surface: '#3C3F41', text: '#A9B7C6', accent: '#CC7832', secondary: '#6A8759', tertiary: '#6897BB' },
+      ];
+      const rgb = (hex: string) => `rgb(${[1, 3, 5].map(n => parseInt(hex.slice(n, n + 2), 16)).join(', ')})`;
+      try {
+        menuButton.click();
+        await wait(80);
+        for (const item of cases) {
+          const option = document.querySelectorAll<HTMLButtonElement>('.v0-theme-option')[cases.indexOf(item)]!;
+          option.click(); await wait(220); // Let the button's 150 ms color transition settle.
+          const background = getComputedStyle(document.querySelector<HTMLElement>('.v0-main')!).backgroundColor;
+          const surface = getComputedStyle(document.querySelector<HTMLElement>('.v0-composer')!).backgroundColor;
+          const accent = getComputedStyle(document.querySelector<HTMLElement>('.v0-send')!).backgroundColor;
+          const vars = getComputedStyle(document.documentElement);
+          for (const [key, value] of Object.entries(item)) {
+            if (key === 'id') continue;
+            if (vars.getPropertyValue(`--ui-${key === 'background' ? 'bg' : key}`).trim().toUpperCase() !== value.toUpperCase()) throw new Error(`${item.id} ${key} 팔레트 값 불일치`);
+          }
+          if (document.documentElement.dataset.theme !== item.id || localStorage.getItem('esh.ui-theme') !== item.id || option.getAttribute('aria-pressed') !== 'true' || background !== rgb(item.background) || surface !== rgb(item.surface) || accent !== rgb(item.accent)) throw new Error(`${item.id} 테마 적용 실패: ${JSON.stringify({ background, surface, accent })}`);
+          samples.push({ id: item.id, background, surface, accent });
+        }
+      } finally {
+        const restore = cases.some(item => item.id === original) ? original! : 'slate';
+        document.querySelectorAll<HTMLButtonElement>('.v0-theme-option')[cases.findIndex(item => item.id === restore)]?.click();
+        await wait(50);
+        if (original === null) localStorage.removeItem('esh.ui-theme');
+      }
+      themeSelection = { samples, restored: original ?? 'slate', emptyPanelInitiallyClosed };
+    } else if (mode === 'compact') {
       compact = await compactProbe();
     } else if (mode === 'context') {
       contextUsage = await contextProbe();
@@ -315,6 +365,8 @@ export async function runGuiProbe(mode: string) {
       const leadBold = leadBody.querySelector<HTMLElement>('strong')!;
       const archBody = arch.querySelector<HTMLElement>('.markdown-body')!;
       const archHeading = arch.querySelector<HTMLElement>('h2')!;
+      const leadStyle = getComputedStyle(leadBody);
+      const archStyle = getComputedStyle(archBody);
       const sizes = {
         leadBody: parseFloat(getComputedStyle(leadBody).fontSize),
         leadHeading: parseFloat(getComputedStyle(leadHeading).fontSize),
@@ -333,9 +385,17 @@ export async function runGuiProbe(mode: string) {
         htmlBlocked: !lead.querySelector('script, iframe, img, [onerror]'),
         userPlain: !user.querySelector('[data-content] h1, [data-content] strong') && user.querySelector('[data-content]')?.textContent?.startsWith('# 사용자 원문') === true,
         archMarkdown: !!arch.querySelector('h2') && checklist?.disabled === true,
+        archTableFits: (() => { const wrap = arch.querySelector<HTMLElement>('.markdown-table-scroll'); return !!wrap && wrap.scrollWidth <= wrap.clientWidth + 2; })(),
         codeScroll: getComputedStyle(code).overflowX === 'auto' && code.scrollWidth > code.clientWidth,
         noCardOverflow: lead.scrollWidth <= lead.clientWidth + 2,
-        balancedType: sizes.leadBody === 13 && sizes.leadHeading <= 18 && sizes.leadBold === sizes.leadBody && sizes.archBody === 12 && sizes.archHeading <= 14,
+        balancedType: sizes.leadBody === 14 && sizes.leadHeading <= 18 && sizes.leadBold === sizes.leadBody && sizes.archBody === 13 && sizes.archHeading <= 15,
+        leadDocumentStyle: leadStyle.backgroundColor === 'rgba(0, 0, 0, 0)' && leadStyle.borderTopWidth === '0px' && leadStyle.paddingLeft === '0px',
+        archCardPreserved: archStyle.backgroundColor !== 'rgba(0, 0, 0, 0)' && archStyle.borderTopWidth !== '0px',
+        leadHeaderRemoved: !lead.querySelector('.message-meta') && !!arch.querySelector('.message-meta'),
+        leadTimeBelow: !!lead.querySelector('.message-footer time') && lead.querySelector<HTMLElement>('.message-footer')!.getBoundingClientRect().top >= leadBody.getBoundingClientRect().bottom,
+        userTimeBelow: !!user.querySelector('.message-footer time') && user.querySelector<HTMLElement>('.message-footer')!.getBoundingClientRect().top >= user.querySelector<HTMLElement>('[data-content]')!.getBoundingClientRect().bottom,
+        userBubbleDistinct: getComputedStyle(user).backgroundColor !== 'rgba(0, 0, 0, 0)' && getComputedStyle(lead).backgroundColor === 'rgba(0, 0, 0, 0)',
+        turnDivider: !!lead.querySelector('hr.message-turn-divider') && !user.querySelector('hr.message-turn-divider') && !arch.querySelector('hr.message-turn-divider'),
       };
       if (Object.values(checks).some(value => !value)) throw new Error(`Markdown checks: ${JSON.stringify({ checks, sizes })}`);
       markdownUi = { ...checks, sizes, syntheticRenderingFixture: true, newAiCalls: false };
@@ -364,6 +424,88 @@ export async function runGuiProbe(mode: string) {
       if (fixtures.length !== hidden.size || fixtures.some(r => r.querySelector('strong')?.textContent?.startsWith('현재 사용자 메시지:'))) throw new Error('검증 세션 표시/제목 정리 실패');
       importUi = { realCliList: true, defaultFixturesHidden: true, defaultAutomationHidden: true, expectedHidden: hidden.size, fixturesShown: fixtures.length, searchButtonWidth: button.getBoundingClientRect().width, selectedName: name, selectedButtonEnabled: true };
       document.querySelector<HTMLButtonElement>('.workspace-dialog [aria-label="닫기"]')!.click();
+    } else if (mode === 'registry') {
+      const before = await invoke<Snapshot>('get_snapshot');
+      const fixture = await invoke<string | null>('get_registry_probe_path');
+      if (!fixture) throw new Error('등록 검증 실행 파일 경로가 없어');
+      document.querySelector<HTMLButtonElement>('[data-action="agents-tab"]')!.click();
+      await until(() => !!document.querySelector('[data-action="add-agent"]'), 10);
+      await until(() => document.querySelector<HTMLElement>('.v0-agents-detail [data-active-role]')?.dataset.activeRole === 'lead', 10);
+      document.querySelector<HTMLButtonElement>('[data-action="add-agent"]')!.click();
+      await until(() => !!document.querySelector('[aria-label="실행 파일 경로"]'), 10);
+      if (!document.querySelector('[aria-label="희망 역할"]')) throw new Error('등록 역할이 희망 역할로 구분되지 않았어');
+      const candidates = await invoke<{provider:string;installation:string;path:string|null}[]>('detect_agent_candidates');
+      if (!candidates.some(c => c.provider === 'claude_code') || !candidates.some(c => c.provider === 'gemini_cli') || !candidates.some(c => c.provider === 'opencode')) throw new Error('지원 후보가 빠졌어');
+      if (document.querySelectorAll('[data-candidate]').length !== candidates.length) throw new Error('탐지 후보 목록이 화면에 없어');
+      for (const provider of ['gemini_cli', 'opencode']) {
+        const candidate = candidates.find(c => c.provider === provider)!;
+        if (!candidate.path) throw new Error(`${provider} 기본 경로가 없어`);
+        document.querySelector<HTMLButtonElement>(`[data-candidate="${provider}"]`)!.click(); await wait(60);
+        if (document.querySelector<HTMLInputElement>('[aria-label="실행 파일 경로"]')!.value !== candidate.path) throw new Error(`${provider} 경로가 입력칸에 반영되지 않았어`);
+      }
+      document.querySelector<HTMLButtonElement>('[data-candidate="claude_code"]')!.click(); await wait(60);
+      await fill('[aria-label="실행 파일 경로"]', fixture);
+      document.querySelector<HTMLButtonElement>('[data-action="register-agent"]')!.click();
+      await until(() => !!document.querySelector('[data-provider="claude_code"]'), 10);
+      const node = document.querySelector<HTMLButtonElement>('[data-provider="claude_code"]')!;
+      node.click(); await wait(60);
+      if (node.dataset.support !== 'unsupported' || node.dataset.installation !== 'installed' || node.dataset.authentication !== 'unknown' || node.dataset.availability !== 'unavailable') throw new Error('미지원 인스턴스 상태가 잘못됐어');
+      const detail = document.querySelector<HTMLElement>('.v0-agents-detail')?.textContent ?? '';
+      if (!detail.includes('미지원') || !detail.includes('설정 필요') || !detail.includes('Lead') || !detail.includes('인스턴스 ID') || !detail.includes('희망 역할') || !detail.includes('활성 역할')) throw new Error('등록 상세 정보가 빠졌어');
+      if (document.querySelector<HTMLElement>('.v0-agents-detail [data-active-role]')?.dataset.activeRole !== '') throw new Error('미지원 인스턴스의 역할이 활성화됐어');
+      const saved = await invoke<{id:string;provider:string;role:string;activeRole:string|null}[]>('list_agent_instances');
+      if (saved.length !== 3 || saved.filter(item => item.provider === 'claude_code').length !== 1) throw new Error('등록 행 수가 잘못됐어');
+      if (saved[2].role !== 'lead' || saved[2].activeRole !== null) throw new Error('희망 역할과 활성 역할이 분리되지 않았어');
+      let duplicateRejected = false;
+      try { await invoke('register_agent_instance', { provider: 'claude_code', path: fixture, role: 'lead' }); } catch { duplicateRejected = true; }
+      if (!duplicateRejected) throw new Error('중복 등록이 허용됐어');
+      document.querySelector<HTMLButtonElement>('[data-action="unregister-agent"]')!.click();
+      await until(() => !document.querySelector('[data-provider="claude_code"]'), 10);
+      const after = await invoke<Snapshot>('get_snapshot');
+      if (JSON.stringify(before.messages) !== JSON.stringify(after.messages) || JSON.stringify(before.sessions) !== JSON.stringify(after.sessions) || before.revision !== after.revision) throw new Error('등록이 대화 기록을 변경했어');
+      registryStatus = { candidates, registeredId: saved[2].id, unsupported: true, duplicateRejected, removed: true, snapshotUnchanged: true };
+      document.querySelector<HTMLButtonElement>('[data-action="chat-tab"]')!.click(); await wait(80);
+    } else if (mode === 'agents') {
+      const before = await invoke<Snapshot>('get_snapshot');
+      const chatScroll = document.querySelector<HTMLElement>('.v0-conversation-scroll')!;
+      const chatInner = document.querySelector<HTMLElement>('.v0-conversation-inner')!;
+      const originalHeight = chatInner.style.minHeight;
+      chatInner.style.minHeight = '200vh';
+      chatScroll.scrollTop = 160;
+      const scrollBefore = chatScroll.scrollTop;
+      if (scrollBefore < 100) throw new Error('대화 스크롤 검증 범위를 만들 수 없어');
+      document.querySelector<HTMLButtonElement>('[data-action="agents-tab"]')!.click();
+      await until(() => [...document.querySelectorAll<HTMLElement>('[data-panel="agents"] [data-agent]')].length === 2 && [...document.querySelectorAll<HTMLElement>('[data-panel="agents"] [data-agent]')].every(node => node.dataset.installation !== 'not_checked'), 10);
+      if (getComputedStyle(document.querySelector<HTMLElement>('[data-panel="main"]')!).display !== 'none' || getComputedStyle(document.querySelector<HTMLElement>('[data-panel="collaboration"]')!).display !== 'none') throw new Error('Agents 화면에서 대화 또는 협업 패널이 보였어');
+      const agentsWidth = document.querySelector<HTMLElement>('[data-panel="agents"]')!.getBoundingClientRect().width;
+      if (agentsWidth < 450) throw new Error('Agents 화면이 남은 영역을 사용하지 않아');
+      const rows = async () => {
+        const values = [];
+        for (const node of document.querySelectorAll<HTMLButtonElement>('[data-panel="agents"] [data-agent]')) {
+          node.click(); await wait(30);
+          values.push({ id: node.dataset.agent, installation: node.dataset.installation, authentication: node.dataset.authentication, availability: node.dataset.availability, status: node.dataset.status, text: document.querySelector<HTMLElement>('.v0-agents-detail')?.textContent });
+        }
+        return values;
+      };
+      const first = await rows();
+      if (first.some(row => !row.text?.includes('실행 상태') || !row.text?.includes('연결 방식') || !row.text?.includes('점검 시각') || !row.text?.includes('stdio JSON-RPC') && !row.text?.includes('stream-json'))) throw new Error('Agents 상세 필드 또는 연결 방식이 없어');
+      const refresh = document.querySelector<HTMLButtonElement>('[data-action="refresh-agents"]')!;
+      let observedChecking = false;
+      const observer = new MutationObserver(() => { if (refresh.disabled && refresh.textContent?.includes('점검 중')) observedChecking = true; });
+      observer.observe(refresh, { attributes: true, childList: true, subtree: true, characterData: true });
+      refresh.click();
+      await wait(80);
+      await until(() => !refresh.disabled, 10);
+      observer.disconnect();
+      if (!observedChecking) throw new Error('수동 새로고침의 점검 중 상태가 표시되지 않았어');
+      const second = await rows();
+      const after = await invoke<Snapshot>('get_snapshot');
+      if (JSON.stringify(before.messages) !== JSON.stringify(after.messages) || JSON.stringify(before.sessions) !== JSON.stringify(after.sessions) || JSON.stringify(before.activeRun) !== JSON.stringify(after.activeRun) || before.revision !== after.revision) throw new Error('상태 점검이 대화 또는 실행 상태를 변경했어');
+      agentStatus = { first, second, snapshotUnchanged: true, manualRefresh: true, observedChecking, agentsWidth };
+      document.querySelector<HTMLButtonElement>('[data-action="chat-tab"]')!.click();
+      await wait(80);
+      if (chatScroll.scrollTop !== scrollBefore) throw new Error('대화로 돌아온 뒤 스크롤 위치가 바뀌었어');
+      chatInner.style.minHeight = originalHeight;
     } else if (mode === 'workspace') {
       workspace = await workspaceProbe();
     } else if (mode === 'live') {
@@ -406,14 +548,18 @@ export async function runGuiProbe(mode: string) {
         if (document.querySelector('.v0-header-state, .v0-collab-footer')) throw new Error('제거한 상태/안내 UI가 남아 있어');
         const composer = document.querySelector<HTMLTextAreaElement>('.v0-composer textarea');
         if (composer && composer.getBoundingClientRect().height > 74) throw new Error('입력창 기본 높이가 줄지 않았어');
+        const listWidth = document.querySelector<HTMLElement>('[data-panel="collaboration"]')!.getBoundingClientRect().width;
         const thread = document.querySelector<HTMLButtonElement>('[data-review-id]');
         if (thread) { thread.click(); await wait(80); }
         const reviewCard = document.querySelector<HTMLElement>('.v0-review-detail .message-card .markdown-body');
         if (reviewCard) {
           const detail = document.querySelector<HTMLElement>('.v0-review-detail')!;
+          const detailWidth = document.querySelector<HTMLElement>('[data-panel="collaboration"]')!.getBoundingClientRect().width;
           const reviewFont = parseFloat(getComputedStyle(reviewCard).fontSize);
-          if (reviewFont < 12 || reviewFont > 13) throw new Error('협업 본문 글자 크기가 조정 범위를 벗어났어');
+          if (reviewFont !== 13) throw new Error('협업 본문 글자 크기가 조정 범위를 벗어났어');
+          if (listWidth < 500 && detailWidth < listWidth + 80) throw new Error('협업 상세 폭이 목록보다 넓어지지 않았어');
           if (reviewCard.getBoundingClientRect().width < detail.clientWidth - 36) throw new Error('협업 본문이 패널 폭을 충분히 쓰지 않아');
+          reviewLayout = { listWidth, detailWidth, reviewFont };
           if (!document.querySelector('[data-action="review-back"]')) throw new Error('스레드 목록으로 돌아가기 버튼이 없어');
           document.querySelector<HTMLButtonElement>('[data-action="review-back"]')!.click(); await wait(80);
           if (!document.querySelector('[data-thread-list]') || document.querySelector('[data-thread-detail]')) throw new Error('뒤로 가기가 목록을 표시하지 않아');
@@ -422,14 +568,19 @@ export async function runGuiProbe(mode: string) {
           document.querySelector<HTMLButtonElement>('[data-action="review-back"]')!.click(); await wait(80);
         }
         const mainCard = document.querySelector<HTMLElement>('.v0-conversation-scroll .markdown-body');
-        if (mainCard && parseFloat(getComputedStyle(mainCard).fontSize) < 13) throw new Error('중앙 대화 글자가 여전히 작아');
+        if (mainCard && parseFloat(getComputedStyle(mainCard).fontSize) !== 14) throw new Error('중앙 대화 글자 크기가 조정 값과 달라');
+        if (document.querySelector('[aria-label="파일 첨부 미지원"]')) throw new Error('미지원 첨부 버튼이 여전히 보여');
         document.querySelector<HTMLButtonElement>('[data-action="agents-tab"]')!.click();
         await wait(80);
-        if (!document.querySelector('.v0-connections [data-agent="codex"]') || !document.querySelector('.v0-connections [data-agent="antigravity"]')) throw new Error('Agents 화면의 Connections 상태가 없어');
+        if (!document.querySelector('[data-panel="agents"] [data-agent="codex"]') || !document.querySelector('[data-panel="agents"] [data-agent="antigravity"]')) throw new Error('Agents 화면의 에이전트 목록이 없어');
         document.querySelector<HTMLButtonElement>('[data-action="chat-tab"]')!.click();
         await wait(80);
       }
     } else if (mode !== 'restore') { throw new Error('Unknown probe mode'); }
+    if (!document.querySelector('[data-thread-list], [data-thread-detail]')) {
+      document.querySelector<HTMLButtonElement>('.v0-collab-toggle')!.click();
+      await wait(80);
+    }
     await wait(400);
     const initialPanelWidths = Object.fromEntries(['explorer', 'collaboration'].map(panel => [panel, document.querySelector<HTMLElement>(`[data-panel="${panel}"]`)!.getBoundingClientRect().width]));
     const resizeResults = [];
@@ -459,7 +610,7 @@ export async function runGuiProbe(mode: string) {
     const snapshot = await invoke<Snapshot>('get_snapshot');
     const rendered = [...[...document.querySelectorAll<HTMLElement>('[data-panel="main"] [data-message-id]')].map(node => renderedMessage(node, snapshot)), ...await reviewMessages(snapshot)];
     const agents = [...document.querySelectorAll<HTMLElement>('[data-agent]')].map(node => ({ id: node.dataset.agent, status: node.dataset.status, text: node.textContent }));
-    await invoke('record_gui_probe', { payload: { mode, workspace, importUi, modelSelection, markdownUi, cancellation, streaming, contextUsage, compact, focusFeedback, contextDisplay: document.querySelector('[aria-label="Codex 컨텍스트 상태"]')?.textContent, composerSelection: {model: document.querySelector<HTMLSelectElement>('[aria-label="Codex 모델"]')?.value, effort: document.querySelector<HTMLSelectElement>('[aria-label="Codex 추론 강도"]')?.value}, selectedSessionId: document.querySelector<HTMLElement>('[data-session-id][aria-current="page"]')?.dataset.sessionId, startedAt, completedAt: new Date().toISOString(), rendered, agents, snapshot, resizeResults, initialPanelWidths, navigation, collaborationEditableCount: document.querySelectorAll('[data-panel="collaboration"] textarea, [data-panel="collaboration"] input:not([disabled]), [data-panel="collaboration"] form, [data-panel="collaboration"] [contenteditable="true"]').length, archivedIds: [...document.querySelectorAll<HTMLElement>('[data-archived-id]')].map(n => n.dataset.archivedId), alerts: [...document.querySelectorAll('[role="alert"]')].map(n => n.textContent) } });
+    await invoke('record_gui_probe', { payload: { mode, workspace, importUi, modelSelection, markdownUi, cancellation, streaming, contextUsage, compact, focusFeedback, themeSelection, reviewLayout, agentStatus, registryStatus, contextDisplay: document.querySelector('[aria-label="Codex 컨텍스트 상태"]')?.textContent, composerSelection: {model: document.querySelector<HTMLSelectElement>('[aria-label="Codex 모델"]')?.value, effort: document.querySelector<HTMLSelectElement>('[aria-label="Codex 추론 강도"]')?.value}, selectedSessionId: document.querySelector<HTMLElement>('[data-session-id][aria-current="page"]')?.dataset.sessionId, startedAt, completedAt: new Date().toISOString(), rendered, agents, snapshot, resizeResults, initialPanelWidths, navigation, collaborationEditableCount: document.querySelectorAll('[data-panel="collaboration"] textarea, [data-panel="collaboration"] input:not([disabled]), [data-panel="collaboration"] form, [data-panel="collaboration"] [contenteditable="true"]').length, archivedIds: [...document.querySelectorAll<HTMLElement>('[data-archived-id]')].map(n => n.dataset.archivedId), alerts: [...document.querySelectorAll('[role="alert"]')].map(n => n.textContent) } });
   } catch (e) {
     await invoke('record_gui_probe', { payload: { mode, startedAt, failed: String(e), body: document.body.innerText } });
   } finally { await invoke('close_probe'); }

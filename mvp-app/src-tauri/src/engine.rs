@@ -1,10 +1,11 @@
 use crate::{
-    cli::{self, Rpc},
+    agents::{registered, AgentRole, CodexLeadSession, LeadAdapter, LeadSession, ReviewAdapter, ANTIGRAVITY, CODEX},
     store::{err, ActiveRunSnapshot, Message, Result, Route, Snapshot, Store},
 };
 use serde_json::json;
 use crate::models::{CodexModel, ModelSettings};
 use std::{
+    future::Future,
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -12,6 +13,32 @@ use std::{
     },
     time::Duration,
 };
+
+// The worker has already taken the next input from its queue when this runs.
+// Dropping that input after closing the previous connection loses the turn.
+async fn switch_connection<C, F, Fut>(
+    connection: &mut Option<C>,
+    owner: &mut Option<String>,
+    next_session: &str,
+    close: F,
+) -> Result<()>
+where
+    F: FnOnce(C) -> Fut,
+    Fut: Future<Output = Result<()>>,
+{
+    if owner.as_deref() == Some(next_session) && connection.is_some() {
+        return Ok(());
+    }
+    let previous = connection.take();
+    *owner = None;
+    if let Some(previous) = previous {
+        close(previous).await?;
+    }
+    Ok(())
+}
+fn interrupt_consumed_input(store: &Store, id: &str) -> Result<bool> {
+    store.interrupt_queued(id)
+}
 use tauri::{AppHandle, Emitter};
 use tokio::sync::{mpsc, watch};
 
@@ -153,7 +180,13 @@ impl Engine {
         if text.len() > 16000 {
             return Err("메시지는 UTF-8 기준 16KB 이하로 입력해 주세요".into());
         }
-        if target != "codex" && target != "antigravity" {
+        let supported = registered().iter().any(|adapter| {
+            let agent = adapter.descriptor();
+            agent.id == target &&
+                ((agent.roles.contains(&AgentRole::Lead) && agent.capabilities.lead_conversation) ||
+                 (agent.roles.contains(&AgentRole::Reviewer) && agent.capabilities.delegated_review))
+        });
+        if !supported {
             return Err("지원하지 않는 수신 대상입니다".into());
         }
         let active = self.active.lock().map_err(err)?;
@@ -248,8 +281,9 @@ impl Engine {
         mut compact_rx: mpsc::UnboundedReceiver<String>,
         mut stop: watch::Receiver<bool>,
     ) {
-        let mut rpc: Option<Rpc> = None;
+        let mut rpc: Option<CodexLeadSession> = None;
         let mut rpc_owner: Option<String> = None;
+        let mut connection_uncertain = false;
         loop {
             let job = tokio::select! { biased; _=stop.changed()=>break, value=rx.recv()=>match value{Some(v)=>Job::Message(v),None=>break}, value=compact_rx.recv()=>match value{Some(v)=>Job::Compact(v),None=>break} };
             if *stop.borrow() {
@@ -257,6 +291,12 @@ impl Engine {
             }
             let input = match job {
                 Job::Compact(session) => {
+                    if connection_uncertain {
+                        let _ = self.store.finish_context(&session, "unknown");
+                        let _ = self.store.audit("compact_failed", json!({"sessionId":session,"error":"이전 Codex 연결 종료 확인 불가 (unknown)"}));
+                        let _ = self.emit();
+                        continue;
+                    }
                     self.run_compact(&session, &mut rpc, &mut rpc_owner, stop.clone()).await;
                     continue;
                 }
@@ -275,25 +315,11 @@ impl Engine {
             if !queued {
                 continue;
             }
-            if rpc_owner.as_deref() != Some(&input.message.chat_session_id) {
-                if let Some(mut old) = rpc.take() {
-                    let prev = self.store.execution_session_id().ok();
-                    if let Some(owner) = &rpc_owner {
-                        let _ = self.store.set_execution_session(owner);
-                    }
-                    if let Err(e) = old.close().await {
-                        let _ = self.error("codex", &e);
-                    }
-                    if let Some(s) = prev {
-                        let _ = self.store.set_execution_session(&s);
-                    }
-                    continue;
-                }
-                rpc_owner = Some(input.message.chat_session_id.clone());
+            if connection_uncertain {
+                let _ = interrupt_consumed_input(&self.store, &input.message.id);
+                let _ = self.emit();
+                continue;
             }
-            let _ = self
-                .store
-                .set_execution_session(&input.message.chat_session_id);
             let (run_stop, run_stopped) = watch::channel(false);
             let run_id = uuid::Uuid::new_v4().to_string();
             *self.active.lock().unwrap() = Some(ActiveRun {
@@ -307,13 +333,25 @@ impl Engine {
             if *stop.borrow() {
                 if let Some(run) = self.active.lock().unwrap().as_ref() { let _ = run.stop.send(true); }
             }
-            let result = if input.target == "antigravity" {
+            let transition = switch_connection(
+                &mut rpc,
+                &mut rpc_owner,
+                &input.message.chat_session_id,
+                |mut old| async move { LeadSession::close(&mut old).await },
+            ).await.map_err(|e| format!("연결 전환 종료 확인 불가 (unknown): {e}"));
+            if transition.is_err() { connection_uncertain = true; }
+            let _ = self.store.set_execution_session(&input.message.chat_session_id);
+            let result = if let Err(e) = transition {
+                Err(e)
+            } else if *run_stopped.borrow() {
+                Err("실행 중단".into())
+            } else if input.target == "antigravity" {
                 let _ = self.state("antigravity", "arch_running", "질문에 답하는 중");
                 let _ = self
                     .store
                     .delivery(&[input.message.id.clone()], "delivered");
                 let _ = self.emit();
-                match cli::arch(
+                match ANTIGRAVITY.review(
                     self.store.clone(),
                     &input.message.content,
                     input.message.version,
@@ -330,14 +368,15 @@ impl Engine {
                     Err(e) => Err(e),
                 }
             } else {
-                self.codex_turn(&mut rpc, &input.message, &input.settings, run_stopped.clone())
-                    .await
+                let result = self.codex_turn(&mut rpc, &input.message, &input.settings, run_stopped.clone()).await;
+                if rpc.is_some() { rpc_owner = Some(input.message.chat_session_id.clone()); }
+                result
             };
             if self.streams.lock().unwrap().interrupt(&self.store).unwrap_or(0) > 0 { let _ = self.emit(); }
             if *stop.borrow() { break; }
             if *run_stopped.borrow() {
                 let cancelled = match rpc.as_mut() {
-                    Some(connection) => connection.cancel_turn().await,
+                    Some(connection) => LeadSession::cancel_turn(connection).await,
                     None => Ok("cancelled".to_string()),
                 };
                 let arch_unknown = result.as_ref().err().is_some_and(|e| e.contains("unknown"));
@@ -345,7 +384,7 @@ impl Engine {
                     Ok(status) if !arch_unknown => (status, "사용자가 실행을 중단했습니다".to_string()),
                     other => {
                         let detail = format!("중단 결과 확인 불가 (unknown): {:?}", other);
-                        if let Some(mut connection) = rpc.take() { let _ = connection.close().await; }
+                        if let Some(mut connection) = rpc.take() { let _ = LeadSession::close(&mut connection).await; }
                         let _ = self.store.message("system", &detail, true);
                         ("unknown".into(), detail)
                     }
@@ -362,11 +401,19 @@ impl Engine {
                 if *stop.borrow() {
                     break;
                 }
-                let _ = self.error(&input.target, &e);
+                // A failed close, reconnect, or start has consumed this queue entry.
+                // Keep it in SQLite as a recoverable, non-replayed input.
+                let _ = interrupt_consumed_input(&self.store, &input.message.id);
+                if e.contains("연결 정리 확인 불가 (unknown)") { connection_uncertain = true; }
+                let _ = self.error(if connection_uncertain { "codex" } else { &input.target }, &e);
                 if input.target == "codex" {
                     if let Some(mut old) = rpc.take() {
-                        let _ = old.close().await;
+                        if let Err(close_error) = LeadSession::close(&mut old).await {
+                            connection_uncertain = true;
+                            let _ = self.error("codex", &format!("연결 정리 확인 불가 (unknown): {close_error}"));
+                        }
                     }
+                    rpc_owner = None;
                 }
             }
             }
@@ -384,7 +431,7 @@ impl Engine {
             .store
             .audit("shutdown", json!({"phase":"resolve_open_codex_tools"}));
         let exit = if let Some(mut rpc) = rpc {
-            rpc.close().await
+            LeadSession::close(&mut rpc).await
         } else {
             Ok(())
         };
@@ -422,7 +469,7 @@ impl Engine {
     async fn run_compact(
         &self,
         session: &str,
-        rpc: &mut Option<Rpc>,
+        rpc: &mut Option<CodexLeadSession>,
         rpc_owner: &mut Option<String>,
         stop: watch::Receiver<bool>,
     ) {
@@ -431,7 +478,7 @@ impl Engine {
         match result {
             Ok(outcome) => {
                 if matches!(outcome, CompactOutcome::CompletedUnconfirmed) {
-                    if let Some(mut connection) = rpc.take() { let _ = connection.close().await; }
+                    if let Some(mut connection) = rpc.take() { let _ = LeadSession::close(&mut connection).await; }
                     *rpc_owner = None;
                 }
                 let _ = self.store.audit("compact_completed", json!({"sessionId":session}));
@@ -447,7 +494,7 @@ impl Engine {
                 } else {
                     let _ = self.error("codex", &e);
                 }
-                if let Some(mut connection) = rpc.take() { let _ = connection.close().await; }
+                if let Some(mut connection) = rpc.take() { let _ = LeadSession::close(&mut connection).await; }
                 *rpc_owner = None;
             }
         }
@@ -458,7 +505,7 @@ impl Engine {
     async fn compact_session(
         &self,
         session: &str,
-        rpc: &mut Option<Rpc>,
+        rpc: &mut Option<CodexLeadSession>,
         rpc_owner: &mut Option<String>,
         mut stop: watch::Receiver<bool>,
     ) -> Result<CompactOutcome> {
@@ -467,11 +514,11 @@ impl Engine {
         let thread = saved.thread_id.clone().ok_or("이 세션은 아직 Codex 스레드가 없습니다. 먼저 메시지를 한 번 보내 주세요.")?;
         self.state("codex", "compacting", "컨텍스트를 압축하는 중")?;
         if rpc_owner.as_deref() != Some(session) {
-            if let Some(mut old) = rpc.take() { old.close().await?; }
+            if let Some(mut old) = rpc.take() { LeadSession::close(&mut old).await?; }
             *rpc_owner = None;
-            let mut connection = tokio::select! { _ = stop.changed() => return Err("앱 종료".into()), result = Rpc::start(self.store.clone()) => result? };
-            if let Err(e) = tokio::select! { _ = stop.changed() => Err("앱 종료".to_string()), result = connection.initialize(&saved) => result } {
-                let _ = connection.close().await;
+            let mut connection = tokio::select! { _ = stop.changed() => return Err("앱 종료".into()), result = CODEX.connect(self.store.clone()) => result? };
+            if let Err(e) = tokio::select! { _ = stop.changed() => Err("앱 종료".to_string()), result = connection.open_or_resume(&saved) => result } {
+                let _ = LeadSession::close(&mut connection).await;
                 return Err(e);
             }
             *rpc = Some(connection);
@@ -566,7 +613,7 @@ impl Engine {
     }
     async fn codex_turn(
         &self,
-        rpc: &mut Option<Rpc>,
+        rpc: &mut Option<CodexLeadSession>,
         user: &Message,
         settings: &ModelSettings,
         mut stop: watch::Receiver<bool>,
@@ -577,11 +624,13 @@ impl Engine {
             let mut saved = self.store.session(&user.chat_session_id)?;
             saved.model = settings.model.clone();
             saved.reasoning_effort = settings.reasoning_effort.clone();
-            let mut connection = tokio::select! {_ = stop.changed()=>return Err("앱 종료".into()),result=Rpc::start(self.store.clone())=>result?};
-            let initialized = tokio::select! {_ = stop.changed()=>Err("앱 종료".into()),result=connection.initialize(&saved)=>result};
+            let mut connection = tokio::select! {_ = stop.changed()=>return Err("앱 종료".into()),result=CODEX.connect(self.store.clone())=>result?};
+            let initialized = tokio::select! {_ = stop.changed()=>Err("앱 종료".into()),result=connection.open_or_resume(&saved)=>result};
             if let Err(e) = initialized {
-                let _ = connection.close().await;
-                return Err(e);
+                return Err(match LeadSession::close(&mut connection).await {
+                    Ok(()) => e,
+                    Err(close_error) => format!("{e}; 연결 정리 확인 불가 (unknown): {close_error}"),
+                });
             }
             self.store.bind_codex_session(
                 &user.chat_session_id,
@@ -597,20 +646,19 @@ impl Engine {
         // Keep the start response so cancellation knows the actual turn ID.
         let mut shutdown = self.stop.subscribe();
         if *shutdown.borrow() { return Err("앱 종료".into()); }
-        tokio::select! {_ = shutdown.changed()=>return Err("앱 종료".into()),result=rpc.start_turn(&text, settings)=>result?};
-        self.store.bind_messages(
-            &[user.id.clone()],
+        tokio::select! {_ = shutdown.changed()=>return Err("앱 종료".into()),result=rpc.begin_turn(&text, settings)=>result?};
+        self.store.confirm_turn_start(
+            &user.id,
             &rpc.thread_id,
             rpc.turn_id.as_deref().ok_or("Codex 턴이 없습니다")?,
         )?;
-        self.store.delivery(&[user.id.clone()], "delivered")?;
         self.emit()?;
         let mut reviews = 0;
         loop {
             if *stop.borrow() { return Err("실행 중단".into()); }
             let event = tokio::select! {
                 _=stop.changed()=>return Err("앱 종료".into()),
-                result=tokio::time::timeout(Duration::from_secs(180),rpc.next())=>result.map_err(|_|"Codex 이벤트 응답 시간 초과".to_string())??,
+                result=tokio::time::timeout(Duration::from_secs(180),rpc.next_event())=>result.map_err(|_|"Codex 이벤트 응답 시간 초과".to_string())??,
             };
             let method = event["method"].as_str().unwrap_or_default();
             if crate::context::is_event(&event) { self.emit()?; }
@@ -691,7 +739,7 @@ impl Engine {
                         Err("이번 턴의 자동 리뷰 한도 3회에 도달했습니다".into())
                     } else {
                         self.state("antigravity", "arch_running", "Codex 요청을 검토하는 중")?;
-                        cli::arch(self.store.clone(), question, review_version, stop.clone()).await
+                        ANTIGRAVITY.review(self.store.clone(), question, review_version, stop.clone()).await
                     };
                     if *stop.borrow() {
                         return Err(review.err().filter(|e| e.contains("unknown")).unwrap_or("실행 중단".into()));
@@ -739,7 +787,7 @@ impl Engine {
                         "latestUserRequirements":{"conversationVersion":self.store.session_version(&user.chat_session_id)?,"messages":pending},
                         "reviewIsStale":review_version!=self.store.session_version(&user.chat_session_id)?,"processingOrder":["latestUserRequirements","archReview"]});
                     self.state("codex", "resuming", "최신 요구사항과 리뷰를 전달하는 중")?;
-                    rpc.resolve_once(&event, envelope, success).await?;
+                    rpc.reply_to_tool_call(&event, envelope, success).await?;
                     self.store.bind_messages(
                         &ids,
                         &rpc.thread_id,
@@ -797,5 +845,116 @@ mod compact_event_tests {
         assert!(!matches_compaction_item(&completed, "thread-b", "turn-a", Some("item-a"), "item/completed"));
         assert!(!matches_compaction_item(&completed, "thread-a", "turn-b", Some("item-a"), "item/completed"));
         assert!(!matches_compaction_item(&completed, "thread-a", "turn-a", Some("item-b"), "item/completed"));
+    }
+}
+
+#[cfg(test)]
+mod switch_tests {
+    use super::{interrupt_consumed_input, switch_connection};
+    use crate::store::{Route, Store};
+    use std::sync::{Arc, Mutex};
+
+    #[tokio::test]
+    async fn a_to_b_to_a_closes_each_previous_connection_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("queue.sqlite")).unwrap();
+        let b = store.create_session("default", "B").unwrap();
+        let first_b = store.routed_message("user", "B first", false, Route {
+            channel: "main", kind: "user_message", chat_session_id: Some(b.id.clone()), ..Route::default()
+        }).unwrap();
+        let second_b = store.routed_message("user", "B second", false, Route {
+            channel: "main", kind: "user_message", chat_session_id: Some(b.id.clone()), ..Route::default()
+        }).unwrap();
+        let next_a = store.message("user", "A again", false).unwrap();
+        let closed = Arc::new(Mutex::new(Vec::new()));
+        let mut connection = Some("connection-a".to_string());
+        let mut owner = Some("default-session".to_string());
+        let events = closed.clone();
+        switch_connection(&mut connection, &mut owner, &b.id, move |old| async move {
+            events.lock().unwrap().push(old);
+            Ok(())
+        }).await.unwrap();
+        assert!(connection.is_none());
+        assert!(owner.is_none());
+        connection = Some("connection-b".into()); owner = Some(b.id.clone());
+        store.confirm_turn_start(&first_b.id, "thread-b", "turn-b1").unwrap();
+        switch_connection(&mut connection, &mut owner, &b.id, |_old| async {
+            panic!("same-session input must not close the connection")
+        }).await.unwrap();
+        store.confirm_turn_start(&second_b.id, "thread-b", "turn-b2").unwrap();
+        let events = closed.clone();
+        switch_connection(&mut connection, &mut owner, "default-session", move |old| async move {
+            events.lock().unwrap().push(old);
+            Ok(())
+        }).await.unwrap();
+        store.confirm_turn_start(&next_a.id, "thread-a", "turn-a2").unwrap();
+        assert_eq!(*closed.lock().unwrap(), ["connection-a", "connection-b"]);
+        assert!(connection.is_none());
+        assert!(owner.is_none());
+        assert_eq!(store.snapshot().unwrap().messages.iter().map(|m| (m.content.as_str(), m.delivery.as_str())).collect::<Vec<_>>(), [
+            ("B first", "delivered"), ("B second", "delivered"), ("A again", "delivered")
+        ]);
+    }
+
+    #[tokio::test]
+    async fn close_failure_marks_consumed_input_interrupted_without_replay() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("switch.sqlite")).unwrap();
+        let b = store.create_session("default", "B").unwrap();
+        let input = store.routed_message("user", "send to B", false, Route {
+            channel: "main", kind: "user_message", chat_session_id: Some(b.id), ..Route::default()
+        }).unwrap();
+        let mut connection = Some("connection-a");
+        let mut owner = Some("A".into());
+        assert!(switch_connection(&mut connection, &mut owner, "B", |_old| async {
+            Err("close failed".into())
+        }).await.is_err());
+        assert!(connection.is_none() && owner.is_none());
+        assert!(interrupt_consumed_input(&store, &input.id).unwrap());
+        assert!(!interrupt_consumed_input(&store, &input.id).unwrap());
+        assert!(store.confirm_turn_start(&input.id, "thread-b", "turn-b").is_err());
+        let saved = store.snapshot().unwrap().messages.remove(0);
+        assert_eq!((saved.delivery.as_str(), saved.turn_id), ("interrupted", None));
+    }
+
+    #[tokio::test]
+    async fn cancellation_during_close_keeps_new_turn_unstarted() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("cancel-switch.sqlite")).unwrap();
+        let b = store.create_session("default", "B").unwrap();
+        let input = store.routed_message("user", "cancel B", false, Route {
+            channel: "main", kind: "user_message", chat_session_id: Some(b.id.clone()), ..Route::default()
+        }).unwrap();
+        let (stop, stopped) = tokio::sync::watch::channel(false);
+        let mut connection = Some("connection-a");
+        let mut owner = Some("A".into());
+        switch_connection(&mut connection, &mut owner, &b.id, |_old| async {
+            store.cancel_queued(&b.id)?;
+            stop.send(true).unwrap();
+            Ok(())
+        }).await.unwrap();
+        assert!(*stopped.borrow());
+        assert!(!interrupt_consumed_input(&store, &input.id).unwrap());
+        assert!(store.confirm_turn_start(&input.id, "thread-b", "turn-b").is_err());
+        let saved = store.snapshot().unwrap().messages.remove(0);
+        assert_eq!((saved.delivery.as_str(), saved.turn_id), ("cancelled", None));
+    }
+
+    #[tokio::test]
+    async fn reconnect_failure_leaves_consumed_message_recoverable() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("reconnect.sqlite")).unwrap();
+        let b = store.create_session("default", "B").unwrap();
+        let input = store.routed_message("user", "retry manually", false, Route {
+            channel: "main", kind: "user_message", chat_session_id: Some(b.id.clone()), ..Route::default()
+        }).unwrap();
+        let mut connection = Some("connection-a");
+        let mut owner = Some("default-session".into());
+        switch_connection(&mut connection, &mut owner, &b.id, |_old| async { Ok(()) }).await.unwrap();
+        let reopen: crate::store::Result<()> = Err("mock reconnect failure".into());
+        assert!(reopen.is_err());
+        assert!(interrupt_consumed_input(&store, &input.id).unwrap());
+        assert!(store.confirm_turn_start(&input.id, "thread-b", "turn-b").is_err());
+        assert_eq!(store.snapshot().unwrap().messages[0].delivery, "interrupted");
     }
 }

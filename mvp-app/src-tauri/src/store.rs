@@ -111,6 +111,7 @@ impl Store {
         crate::workspace::migrate(&mut db)?;
         crate::workspace::migrate_model_settings(&mut db)?;
         crate::context::migrate(&mut db)?;
+        crate::registry::migrate(&mut db)?;
         crate::context::recover(&db)?;
         for agent in ["codex", "antigravity"] {
             db.execute(
@@ -246,6 +247,35 @@ impl Store {
         tx.execute("UPDATE meta SET revision=revision+1", [])
             .map_err(err)?;
         tx.commit().map_err(err)
+    }
+
+    /// Commit the user's turn binding and delivery together, only after turn/start returned an ID.
+    pub fn confirm_turn_start(&self, id: &str, thread: &str, turn: &str) -> Result<()> {
+        let mut db = self.db.lock().map_err(err)?;
+        let tx = db.transaction().map_err(err)?;
+        let changed = tx.execute(
+            "UPDATE messages SET thread_id=?1,turn_id=?2,delivery='delivered' WHERE id=?3 AND speaker='user' AND delivery='queued'",
+            params![thread, turn, id],
+        ).map_err(err)?;
+        if changed != 1 {
+            return Err("이 사용자 메시지는 이미 실행됐거나 중단됐습니다".into());
+        }
+        tx.execute("UPDATE meta SET revision=revision+1", []).map_err(err)?;
+        tx.commit().map_err(err)
+    }
+
+    pub fn interrupt_queued(&self, id: &str) -> Result<bool> {
+        let mut db = self.db.lock().map_err(err)?;
+        let tx = db.transaction().map_err(err)?;
+        let changed = tx.execute(
+            "UPDATE messages SET delivery='interrupted' WHERE id=?1 AND speaker='user' AND delivery='queued'",
+            [id],
+        ).map_err(err)?;
+        if changed == 1 {
+            tx.execute("UPDATE meta SET revision=revision+1", []).map_err(err)?;
+        }
+        tx.commit().map_err(err)?;
+        Ok(changed == 1)
     }
 
     pub fn delivery(&self, ids: &[String], state: &str) -> Result<()> {

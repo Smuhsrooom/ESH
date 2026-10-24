@@ -16,6 +16,9 @@ export interface Message {
   chatSessionId: string;
 }
 export interface Agent { id: string; status: string; detail: string; updatedAt: string }
+export interface AgentProbe { id: string; connection: string; installation: 'installed' | 'missing' | 'unknown' | 'error'; authentication: 'authenticated' | 'required' | 'unknown' | 'error'; availability: 'ready' | 'unavailable' | 'unknown' | 'error'; checkedAt: string; failureReason: string | null }
+export interface AgentCandidate { provider: string; name: string; installation: string; path: string | null; failureReason: string | null }
+export interface AgentInstance { id: string; provider: string; name: string; path: string | null; connection: string; role: string; activeRole: string | null; builtin: boolean; support: string; installation: string; authentication: string; availability: string; execution: string; checkedAt: string; failureReason: string | null }
 export interface Room { id: string; name: string; createdAt: string }
 export interface Session { id: string; sessionId: string; createdAt: string; roomId: string; name: string; threadId: string | null; sourceThreadId: string | null; mode: 'new' | 'copy' | 'resume' | 'legacy'; model: string | null; reasoningEffort: string | null }
 export interface ExternalThread { id: string; name?: string; preview?: string; cwd?: string; source?: string | Record<string, unknown>; threadSource?: string | null; agentRole?: string | null; parentThreadId?: string | null; status?: { type: string } }

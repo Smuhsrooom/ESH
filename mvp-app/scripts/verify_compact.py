@@ -18,7 +18,7 @@ def main():
         rows = [{'sequence': n, 'kind': k, 'payload': json.loads(p)} for n, k, p in
                 db.execute('SELECT sequence,kind,payload FROM audit ORDER BY sequence')]
         verify.write('audit.json', rows)
-        assert db.execute('PRAGMA user_version').fetchone()[0] == 4
+        assert db.execute('PRAGMA user_version').fetchone()[0] == 5
         db.close()
 
         thread = compact['threadId']
