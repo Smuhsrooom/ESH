@@ -1,6 +1,11 @@
 .tools/
 .workbuddy-ai/
 technical-spike/
+.vscode/
+.idea/
+/target/
+Thumbs.db
+.DS_Store
 
 mvp-app/evidence/
 mvp-app/node_modules/
@@ -23,3 +28,7 @@ mvp-app/tsconfig.tsbuildinfo
 *.exe
 *.pdb
 *.zip
+*.pem
+*.key
+*.p12
+*.pfx
