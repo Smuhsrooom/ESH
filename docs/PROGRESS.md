@@ -1,5 +1,16 @@
 # ESH 진행 상태와 개발 인계
 
+## 기준선 확인과 검증 환경 복구 (2026-10-25)
+
+- 로드맵 1단계(기존 기능 안정화) 기준선을 현재 트리에서 다시 확인했어. 코드는 변경하지 않았어.
+- 검증 결과 (실제 출력):
+  - `npm test` → `test result: ok. 50 passed; 0 failed; 0 ignored; finished in 0.66s`
+  - `node scripts/verify_external_threads.mjs` → `{"passed":true,"recordedRows":27,"scratchRowsHidden":9,"normalConversationsPreserved":true}`
+  - `npm run build` → `✓ built in 1.99s` (`dist/index.html` 0.36 kB, `index-B_6vxOOa.js` 433.29 kB)
+- 발견한 문제: worktree에서 `verify_external_threads.mjs`가 `mvp-app/evidence/workspace-20261018-041248/audit.json`을 열지 못해 `ENOENT`로 실패했어. `mvp-app/evidence/`가 gitignore 대상이라 worktree에도 새 클론에도 존재하지 않기 때문이야. `mvp-app/evidence`를 원본 저장소에 junction으로 연결해 통과시켰고, 새 worktree를 만들 때도 같은 연결이 필요해.
+- 이번 결과는 로컬 단위·분류 회귀 검사야. 실제 Codex·Antigravity CLI, Tauri WebView, OpenCode 실행은 하지 않았고 기존 실제 연결 성공 기록을 이번 결과로 재집계하지 않아.
+- 다음 작업: 로드맵 1단계 잔여 항목인 "종료·큐·원본 동시 사용 실패 재현" 중 단위 테스트로 재현 가능한 부분부터 착수.
+
 ## 자동화 인계 문서 작성 (2026-10-25)
 
 - `docs/AUTOMATION_HANDOFF.md`를 추가했어. 특정 도구나 프로모션에 종속되지 않도록 "한 회차를 어떻게 수행하는가" 기준으로 정리했고, 붙여넣기용 실행 프롬프트, 검증 명령과 판정 기준, 안전 정책, 도구별 복구 방법, 실측 함정 표를 담았어.
