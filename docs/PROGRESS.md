@@ -1,5 +1,23 @@
 # ESH 진행 상태와 개발 인계
 
+## 공개 답변 스트림의 Mock 검증과 늦은 턴 이벤트 차단 (2026-10-25)
+
+- 선택한 작업: 1단계 회귀 표의 "Codex 사용자 턴" 중 **공개 답변 스트림 경로**, 그리고 2단계 Mock Agent 체크리스트의 "공개 답변"·"늦은 응답" 항목. `engine.rs`의 `codex_turn`은 `item/started`·`item/agentMessage/delta`·`item/completed`를 인라인으로 처리하면서 스레드/턴 일치를 분기마다 따로 비교했어. 이 판정이 `Engine`(AppHandle) 안에 있어 단위 테스트가 닿지 않았고, 그래서 "늦은 턴 이벤트가 현재 답변에 섞이지 않는다"는 계약에는 회귀 검사가 없었어. Mock Agent도 공개 답변 이벤트를 만들지 못해 그 경로를 스크립트로 재현할 수 없었어.
+- 변경 파일:
+  - `mvp-app/src-tauri/src/engine.rs` — `apply_stream_event(streams, store, event, thread, turn, session) -> Result<bool>` 추가. `threadId`/`turnId`가 현재 턴과 다르면 `Ok(false)`로 버리고, `agentMessage` 항목만 초안에 반영하며, 저장된 대화가 바뀌었는지(`changed`)를 돌려줘. `codex_turn`의 세 분기가 이 함수를 호출하도록 교체했고 `emit` 조건과 `dynamicToolCall` 확인 순서는 그대로야.
+  - `mvp-app/src-tauri/src/mock_agent.rs` — `MockAgent::with_public_answer`(기본값 false) 추가. 실제 App Server가 보내는 순서(`item/started` → `item/agentMessage/delta` → 도구 호출 → `item/completed` → `turn/completed`)를 스크립트로 만들고, 회귀 테스트 1개 추가.
+- 동작 보존: Blocking Delegation, `request_arch_review`, `archReview`/`latestUserRequirements` 구조적 분리, `tool_deliveries`, 종료 순서, Arch 타임아웃 120초(범위 30~600), `tool_state`·`status` 반환 계약, DB 스키마·`user_version=6`, 사용자 메시지·세션·컨텍스트는 변경하지 않았어. 이벤트 종류별 처리 결과(초안 시작/델타 누적/완료 확정, `agentMessage` 이외 항목 무시, 턴 불일치 시 무시)는 이전과 같고, 이전 코드가 `turn_id=None`에서 `json!(null)` 비교로 통과하던 경로는 이제 빈 턴으로 처리돼 불일치로 떨어져(패닉 가능 경로 제거) 더 안전한 쪽으로만 달라.
+- 검증 (실제 출력):
+  - `npm test` → `test result: ok. 59 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.44s` (기존 58 + 신규 1, `mock_agent::tests::scripted_public_answer_reaches_the_stream_and_a_late_turn_is_dropped ... ok`)
+  - `node scripts/verify_external_threads.mjs` → `{"passed":true,"recordedRows":27,"scratchRowsHidden":9,"normalConversationsPreserved":true}`
+  - `npm run build` → `✓ built in 2.46s` (`dist/assets/index-B_6vxOOa.js` 433.29 kB, `index-YBSTmYxd.css` 52.24 kB, `guiProbe-djswdxyz.js` 45.64 kB)
+  - 경고는 기존 2건(`agents.rs`의 `Authentication`·`Availability` 미사용 variant)뿐이고 새 경고는 없어.
+- 신규 테스트 내용: Mock Lead가 스크립트한 이벤트를 `apply_stream_event`로 순서대로 넣어 (1) `item/started`는 저장을 바꾸지 않고, (2) 델타가 `main` 채널 `streaming` 메시지를 만들고, (3) 도구 호출 이벤트는 공개 답변으로 취급되지 않아 메시지를 만들지 않고, (4) `item/completed`가 권위 텍스트로 확정해 `mock public answer`/`delivered` 한 건만 남는지 확인해. 이어서 2턴이 현재일 때 1턴의 늦은 델타·완료 이벤트를 넣어 저장이 늘지 않고 `late` 텍스트가 섞이지 않는지, 같은 2턴의 정상 델타는 두 번째 메시지(`mock public `, `streaming`)로 들어가는지 확인해.
+- 이번 결과는 Rust 단위·Mock 회귀 검사야. 실제 Codex App Server가 이 이벤트를 보내는 경로, 실제 WebView의 답변 스트리밍 표시는 확인하지 않았어. `codex_turn`의 배선(어느 분기에서 함수를 부르고 언제 `emit`하는지)은 컴파일과 코드 확인으로만 검증했어. `python scripts/verify_*.py`와 데스크톱 빌드는 실행하지 않았어(변경이 Rust 백엔드이고 실행 중인 앱을 건드리지 않으려고).
+- 1단계 잔여 4건(GUI 실행 확인, 플러그인 내부 경합, 원본 세션 전역 잠금=**승인 대기**, 종료 중 거절의 WebView 재현)은 지난 회차와 같이 이 환경에서 완결 불가라 그대로 차단 상태야. 이번 작업은 그 4건과 독립적인 회귀 보강이라 1단계 범위 안에 있어.
+- 남은 문제: (a) 위 4건 그대로. (b) Mock은 공개 답변·늦은 이벤트만 재현하고, 인증 불명·프로세스 종료 불명확·`tool_deliveries` 상태 전이는 여전히 `cli.rs`/`store.rs` 테스트가 담당해 Mock 경로로는 검증되지 않아. (c) `Streams`의 40ms flush 스로틀 때문에 델타 반환값은 타이밍에 따라 달라져, 테스트는 반환값 대신 저장 결과로 판정해.
+- 다음 작업: Mock에 "프로세스 종료 불명확(exit unknown)" 시나리오를 추가해 `tool_deliveries`가 `unknown`으로 남는 경로를 Mock 경로에서도 확인하거나, 남은 1단계 차단 항목 중 사용자 환경 확인이 필요한 것을 정리.
+
 ## 1단계 자동화 가능 항목 완료 확인과 잔여 항목 차단 상태 (2026-10-25)
 
 - 선택한 작업: 로드맵 1단계(기존 기능 안정화)의 자동화 환경에서 완결 가능한 항목이 모두 끝났는지 현재 트리를 재확인. 1~9회차까지 종료 접수 차단 확장, 무음 성공 제거(`tool_state`/`status`/`confirm_tool`), 등록·해제 snapshot 반영, 고아 `agents` 행 정리, 배지·목록 불일치, 리뷰 응답 봉투의 요구사항 단일 읽기까지 단위 검증 가능한 결함을 모두 고쳤음. 이번 회차는 코드를 더 안 고치고 세 가지 검증 명령으로 기준선을 다시 돌림(이전 실행이 중단된 뒤 시간이 흘러 재확인 가치가 있음).
