@@ -237,6 +237,16 @@ async fn close_probe(app: tauri::AppHandle, engine: tauri::State<'_, Arc<Engine>
 fn main() {
     let closing = Arc::new(AtomicBool::new(false));
     tauri::Builder::default()
+        // Must stay the first plugin: it decides whether this process owns the
+        // app before any other plugin or setup work touches the shared WebView2
+        // user data folder. A second launch only surfaces the running window.
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.unminimize();
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        }))
         .setup(|app| {
             let probe_dir = if cfg!(debug_assertions) {
                 std::env::args_os().collect::<Vec<_>>().windows(2)
@@ -251,6 +261,11 @@ fn main() {
             app.manage(engine);
             if let Some(window) = app.get_webview_window("main") {
                 window_state::restore(&window, &window_data_dir);
+                // Show explicitly instead of trusting the window config: a
+                // `visible: false` (or a future default change) would otherwise
+                // leave a running app with no window the user can reach. Focus
+                // stays untouched here so launching does not steal it.
+                let _ = window.show();
             }
             Ok(())
         })
