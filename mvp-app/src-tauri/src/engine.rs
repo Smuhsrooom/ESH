@@ -748,8 +748,7 @@ impl Engine {
                             if changed { self.emit()?; }
                         }
                     }
-                    if item["type"] == "dynamicToolCall" {
-                        rpc.confirm_tool(item)?;
+                    if item["type"] == "dynamicToolCall" && rpc.confirm_tool(item)? {
                         self.state("codex", "running", "검토 결과를 반영하는 중")?;
                     }
                 }

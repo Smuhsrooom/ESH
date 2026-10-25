@@ -403,17 +403,25 @@ impl Rpc {
         self.open_call = None;
         self.store.audit("review_delivered",json!({"callKey":key,"callId":call_id,"threadId":self.thread_id,"turnId":msg["params"]["turnId"],"envelope":envelope}))
     }
-    pub fn confirm_tool(&self, item: &Value) -> Result<()> {
+    /// Confirms the reserved delivery for a finished tool call.
+    /// Returns false when no delivery row matches, so an unmatched completion is recorded
+    /// as unmatched instead of leaving a `review_confirmed` audit for a state that was never stored.
+    pub fn confirm_tool(&self, item: &Value) -> Result<bool> {
         let call = item["id"].as_str().ok_or("도구 완료 ID가 없습니다")?;
+        let Some(turn) = self.turn_id.as_deref() else {
+            self.store.audit("review_confirm_unmatched", json!({"callId":call,"connectionId":self.connection_id,"threadId":self.thread_id,"reason":"missing_turn_id"}))?;
+            return Ok(false);
+        };
         let key = format!(
             "{}:{}:{}:{}",
-            self.connection_id,
-            self.thread_id,
-            json!(self.turn_id),
-            call
+            self.connection_id, self.thread_id, json!(turn), call
         );
-        self.store.tool_state(&key, "confirmed")?;
-        self.store.audit("review_confirmed",json!({"callId":call,"threadId":self.thread_id,"turnId":self.turn_id,"success":item["success"]}))
+        if !self.store.tool_state(&key, "confirmed")? {
+            self.store.audit("review_confirm_unmatched", json!({"callId":call,"connectionId":self.connection_id,"threadId":self.thread_id,"turnId":turn,"reason":"no_delivery_row"}))?;
+            return Ok(false);
+        }
+        self.store.audit("review_confirmed",json!({"callId":call,"threadId":self.thread_id,"turnId":turn,"success":item["success"]}))?;
+        Ok(true)
     }
     pub async fn cancel_turn(&mut self) -> Result<String> {
         let result = timeout(Duration::from_secs(12), async {
@@ -648,7 +656,22 @@ mod tests {
             store.db.lock().unwrap().query_row("SELECT state FROM tool_deliveries WHERE call_key=?1", [key], |r| r.get(0)).unwrap()
         };
         assert_eq!(state("connection:thread:\"turn\":call"), "sent");
-        rpc.confirm_tool(&json!({"id":"call","success":true})).unwrap();
+        assert!(rpc.confirm_tool(&json!({"id":"call","success":true})).unwrap());
+        assert_eq!(state("connection:thread:\"turn\":call"), "confirmed");
+        // A completion with no turn id must not be recorded as a confirmation.
+        let confirmed_audits = |kind: &str| -> i64 {
+            store.db.lock().unwrap().query_row("SELECT COUNT(*) FROM audit WHERE kind=?1", [kind], |r| r.get(0)).unwrap()
+        };
+        let confirmed_before = confirmed_audits("review_confirmed");
+        rpc.turn_id = None;
+        assert!(!rpc.confirm_tool(&json!({"id":"call-late","success":true})).unwrap());
+        assert_eq!(confirmed_audits("review_confirmed"), confirmed_before);
+        assert_eq!(confirmed_audits("review_confirm_unmatched"), 1);
+        let null_keys: i64 = store.db.lock().unwrap().query_row("SELECT COUNT(*) FROM tool_deliveries WHERE call_key LIKE '%:null:%'", [], |r| r.get(0)).unwrap();
+        assert_eq!(null_keys, 0);
+        // An unknown key is reported as unmatched rather than silently succeeding.
+        assert!(!store.tool_state("connection:thread:\"turn\":missing", "confirmed").unwrap());
+        rpc.turn_id = Some("turn".into());
         assert_eq!(state("connection:thread:\"turn\":call"), "confirmed");
         let writes: i64 = store.db.lock().unwrap().query_row("SELECT COUNT(*) FROM audit WHERE kind='codex_tx'", [], |r| r.get(0)).unwrap();
         assert_eq!(writes, 1);

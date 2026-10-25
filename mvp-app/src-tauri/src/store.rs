@@ -329,8 +329,11 @@ impl Store {
             .map_err(err)?;
         Ok(rows == 1)
     }
-    pub fn tool_state(&self, key: &str, state: &str) -> Result<()> {
-        self.db
+    /// Returns whether a delivery row actually matched. An update that touches no row
+    /// is not a success: the caller would otherwise record a state that was never stored.
+    pub fn tool_state(&self, key: &str, state: &str) -> Result<bool> {
+        let changed = self
+            .db
             .lock()
             .map_err(err)?
             .execute(
@@ -338,7 +341,7 @@ impl Store {
                 params![state, timestamp(), key],
             )
             .map_err(err)?;
-        Ok(())
+        Ok(changed == 1)
     }
     pub fn snapshot(&self) -> Result<Snapshot> {
         let db = self.db.lock().map_err(err)?;
