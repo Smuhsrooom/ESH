@@ -266,15 +266,31 @@ impl Store {
         })
     }
 
-    pub fn bind_messages(&self, ids: &[String], thread: &str, turn: &str) -> Result<()> {
+    /// Bind queued requirements to the review turn and mark them delivered in a
+    /// single transaction. Binding and delivery used to be two separate writes,
+    /// so a failure in between left the messages bound to a turn while still
+    /// `queued`; the next review then picked them up again and re-sent the same
+    /// requirements. A missing row is now an error instead of a silent success,
+    /// and a caller with nothing to deliver writes nothing at all.
+    pub fn deliver_requirements(&self, ids: &[String], thread: &str, turn: &str) -> Result<()> {
+        if thread.trim().is_empty() || turn.trim().is_empty() {
+            return Err("턴 연결 정보가 비어 있습니다".into());
+        }
+        if ids.is_empty() {
+            return Ok(());
+        }
         let mut db = self.db.lock().map_err(err)?;
         let tx = db.transaction().map_err(err)?;
         for id in ids {
-            tx.execute(
-                "UPDATE messages SET thread_id=?1,turn_id=?2 WHERE id=?3",
-                params![thread, turn, id],
-            )
-            .map_err(err)?;
+            let changed = tx
+                .execute(
+                    "UPDATE messages SET thread_id=?1,turn_id=?2,delivery='delivered' WHERE id=?3",
+                    params![thread, turn, id],
+                )
+                .map_err(err)?;
+            if changed != 1 {
+                return Err("요구사항 메시지를 찾을 수 없습니다".into());
+            }
         }
         tx.execute("UPDATE meta SET revision=revision+1", [])
             .map_err(err)?;
@@ -722,6 +738,53 @@ mod tests {
     }
 
     #[test]
+    fn delivering_requirements_binds_and_marks_delivered_in_one_write() {
+        // Binding the turn and marking `delivered` used to be two transactions.
+        // A failure in between left the message bound but still `queued`, so the
+        // next review handed the same requirement to Codex again. A missing id
+        // must fail the whole write instead of reporting success.
+        let d = tempfile::tempdir().unwrap();
+        let s = Store::open(&d.path().join("deliver.db")).unwrap();
+        let first = s.message("user", "first requirement", false).unwrap();
+        let second = s.message("user", "second requirement", false).unwrap();
+        let revision = s.snapshot().unwrap().revision;
+        s.deliver_requirements(&[first.id.clone(), second.id.clone()], "thread", "turn")
+            .unwrap();
+        let snapshot = s.snapshot().unwrap();
+        assert_eq!(snapshot.revision, revision + 1);
+        for id in [&first.id, &second.id] {
+            let message = snapshot.messages.iter().find(|m| &m.id == id).unwrap();
+            assert_eq!(message.delivery, "delivered");
+            assert_eq!(message.thread_id.as_deref(), Some("thread"));
+            assert_eq!(message.turn_id.as_deref(), Some("turn"));
+        }
+        assert!(s.pending_requirements("default-session").unwrap().1.is_empty());
+
+        // An unknown id rolls the whole batch back: no partial binding, no delivery.
+        let third = s.message("user", "third requirement", false).unwrap();
+        let before = s.snapshot().unwrap();
+        let error = s
+            .deliver_requirements(&[third.id.clone(), "missing-message".into()], "thread-2", "turn-2")
+            .unwrap_err();
+        assert!(error.contains("요구사항 메시지를 찾을 수 없습니다"), "{error}");
+        let after = s.snapshot().unwrap();
+        assert_eq!(after.revision, before.revision);
+        let third_after = after.messages.iter().find(|m| m.id == third.id).unwrap();
+        assert_eq!(third_after.delivery, "queued");
+        assert!(third_after.thread_id.is_none());
+        assert!(third_after.turn_id.is_none());
+        assert_eq!(s.pending_requirements("default-session").unwrap().1.len(), 1);
+
+        // Empty turn binding is refused, and an empty batch writes nothing at all.
+        assert!(s.deliver_requirements(&[third.id.clone()], "thread", " ").is_err());
+        assert!(s.deliver_requirements(&[third.id.clone()], " ", "turn").is_err());
+        let quiet = s.snapshot().unwrap().revision;
+        s.deliver_requirements(&[], "thread", "turn").unwrap();
+        assert_eq!(s.snapshot().unwrap().revision, quiet);
+        assert_eq!(s.pending_requirements("default-session").unwrap().1.len(), 1);
+    }
+
+    #[test]
     fn open_drops_status_rows_whose_instance_is_gone() {
         // A registration removed by an older build could leave its `agents` row
         // behind. Those rows are not user data, they only inflate the Agents badge
@@ -890,7 +953,7 @@ mod tests {
             assert_eq!(user.version, request.version);
             assert_eq!(request.channel, "collaboration");
             assert_eq!(request.collaboration_id.as_deref(), Some("call"));
-            store.bind_messages(&[user.id], "thread", "turn").unwrap();
+            store.deliver_requirements(&[user.id], "thread", "turn").unwrap();
             assert!(store
                 .snapshot()
                 .unwrap()

@@ -911,12 +911,11 @@ impl Engine {
                     let envelope = review_envelope(review, review_version, requirements_version, pending);
                     self.state("codex", "resuming", "최신 요구사항과 리뷰를 전달하는 중")?;
                     rpc.reply_to_tool_call(&event, envelope, success).await?;
-                    self.store.bind_messages(
+                    self.store.deliver_requirements(
                         &ids,
                         &rpc.thread_id,
                         rpc.turn_id.as_deref().ok_or("Codex 턴이 없습니다")?,
                     )?;
-                    self.store.delivery(&ids, "delivered")?;
                     self.emit()?;
                 }
                 "turn/completed" => {

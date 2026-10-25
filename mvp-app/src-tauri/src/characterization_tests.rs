@@ -17,8 +17,7 @@ fn local_sessions_keep_turns_versions_and_resume_bindings_separate() {
     }).unwrap();
     store.bind_codex_session("default-session", "thread-first", "rpc-first").unwrap();
     store.bind_codex_session(&other.id, "thread-second", "rpc-second").unwrap();
-    store.bind_messages(&[first.id.clone()], "thread-first", "turn-first").unwrap();
-    store.delivery(&[first.id.clone()], "delivered").unwrap();
+    store.deliver_requirements(&[first.id.clone()], "thread-first", "turn-first").unwrap();
     store.set_busy_session(Some("default-session".into())).unwrap();
     assert_eq!(store.snapshot().unwrap().busy_session_id.as_deref(), Some("default-session"));
     assert_eq!(store.session_version("default-session").unwrap(), 1);
@@ -54,8 +53,7 @@ fn review_records_and_tool_delivery_survive_restart_without_replaying_open_call(
         channel: "collaboration", kind: "review_reply", thread_id: Some("thread".into()),
         turn_id: Some("turn".into()), collaboration_id: Some("call".into()), ..Route::default()
     }).unwrap();
-    store.bind_messages(&[user.id.clone()], "thread", "turn").unwrap();
-    store.delivery(&[user.id.clone()], "delivered").unwrap();
+    store.deliver_requirements(&[user.id.clone()], "thread", "turn").unwrap();
     assert!(store.reserve_tool("connection:thread:turn:call", &json!("rpc-1")).unwrap());
     assert!(!store.reserve_tool("connection:thread:turn:call", &json!("rpc-1")).unwrap());
     store.tool_state("connection:thread:turn:call", "sent").unwrap();
@@ -95,8 +93,7 @@ fn late_user_requirement_is_queued_only_in_its_session() {
     assert_eq!(pending[0].id, current.id);
     assert_ne!(pending[0].id, foreign.id);
     assert_ne!(review_version, store.session_version("default-session").unwrap());
-    store.bind_messages(&[current.id.clone()], "thread", "turn").unwrap();
-    store.delivery(&[current.id.clone()], "delivered").unwrap();
+    store.deliver_requirements(&[current.id.clone()], "thread", "turn").unwrap();
     assert_eq!(store.snapshot().unwrap().messages.iter().find(|m| m.id == current.id).unwrap().delivery, "delivered");
     assert_eq!(store.snapshot().unwrap().messages.iter().find(|m| m.id == foreign.id).unwrap().delivery, "queued");
 }
