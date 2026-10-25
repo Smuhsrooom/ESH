@@ -5,6 +5,7 @@ mod agents;
 mod mock_agent;
 mod registry;
 mod opencode;
+mod claude;
 mod engine;
 mod models;
 mod store;
