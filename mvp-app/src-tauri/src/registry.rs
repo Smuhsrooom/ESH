@@ -194,9 +194,20 @@ impl Store {
         let tx = db.transaction().map_err(err)?;
         tx.execute("INSERT INTO agent_instances(id,provider,name,executable_path,path_key,connection_kind,role,source,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7,'user',?8)",
             params![id,provider_id,name,path_text,key,connection,role,timestamp()]).map_err(err)?;
-        if connection == "opencode_cli_json" {
-            tx.execute("INSERT OR IGNORE INTO agents(id,status,detail,updated_at) VALUES(?1,'idle','대기 중',?2)", params![id,timestamp()]).map_err(err)?;
-        }
+        // Every registration owns exactly one `agents` row so the Agents badge
+        // (`snapshot.agents.length`) and the Agents view list the same agents.
+        // An instance without an execution connection cannot report a run
+        // state, so its row stays `unknown` instead of pretending to be idle.
+        let (status, detail) = if connection == "opencode_cli_json" {
+            ("idle", "대기 중")
+        } else {
+            ("unknown", "실행 연결이 설정되지 않았습니다")
+        };
+        tx.execute(
+            "INSERT OR IGNORE INTO agents(id,status,detail,updated_at) VALUES(?1,?2,?3,?4)",
+            params![id, status, detail, timestamp()],
+        )
+        .map_err(err)?;
         tx.execute("UPDATE meta SET revision=revision+1", []).map_err(err)?;
         tx.commit().map_err(err)?;
         drop(db);
@@ -369,6 +380,57 @@ mod tests {
         assert_eq!(removed.agents.len(), 2);
         assert!(store.list_agent_instances().unwrap().iter().all(|entry| entry.id != instance.id));
         assert!(cli.exists());
+    }
+
+    #[test]
+    fn every_registration_owns_one_status_row_so_badge_and_list_agree() {
+        // `main.tsx` counts `snapshot.agents.length` for the Agents badge while
+        // the Agents view lists the builtin ids plus every `agent_instances` row.
+        // A registration that wrote no status row made the badge count one agent
+        // fewer than the view listed. Registration now always writes the row and
+        // reopening the store backfills it for registrations stored before this.
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("chat.sqlite");
+        let exe = temp.path().join("claude.exe");
+        std::fs::write(&exe, b"do not execute").unwrap();
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.snapshot().unwrap().agents.len(), 2);
+        let instance = store
+            .register_agent_instance("claude_code", &exe.to_string_lossy(), "lead")
+            .unwrap();
+        let registered = store.snapshot().unwrap();
+        assert_eq!(registered.agents.len(), 3);
+        assert_eq!(registered.agents.iter().filter(|agent| agent.id == instance.id).count(), 1);
+        // An instance that cannot run must not report a run state it never had.
+        assert_eq!(
+            registered.agents.iter().find(|agent| agent.id == instance.id).unwrap().status,
+            "unknown"
+        );
+        // Simulate a row that an earlier build never wrote.
+        store
+            .db
+            .lock()
+            .unwrap()
+            .execute("DELETE FROM agents WHERE id=?1", [&instance.id])
+            .unwrap();
+        assert_eq!(store.snapshot().unwrap().agents.len(), 2);
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        let backfilled = reopened.snapshot().unwrap();
+        assert_eq!(backfilled.agents.len(), 3);
+        let row = backfilled.agents.iter().find(|agent| agent.id == instance.id).unwrap();
+        assert_eq!((row.status.as_str(), row.detail.as_str()), ("unknown", "실행 연결이 설정되지 않았습니다"));
+        // The builtin rows keep their own status while the backfill runs.
+        assert_eq!(
+            backfilled.agents.iter().find(|agent| agent.id == "codex").unwrap().status,
+            "idle"
+        );
+        // Backfilling is idempotent and removal still takes the row with it.
+        drop(reopened);
+        let reopened = Store::open(&path).unwrap();
+        assert_eq!(reopened.snapshot().unwrap().agents.len(), 3);
+        reopened.unregister_agent_instance(&instance.id).unwrap();
+        assert_eq!(reopened.snapshot().unwrap().agents.len(), 2);
     }
 
     #[test]

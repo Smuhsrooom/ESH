@@ -135,6 +135,23 @@ impl Store {
             [],
         )
         .map_err(err)?;
+        // The same invariant in the other direction. `main.tsx` counts
+        // `snapshot.agents.length` for the Agents badge while the Agents view
+        // lists the builtin ids plus every `agent_instances` row, so a
+        // registration that never wrote a status row made the badge count fewer
+        // agents than the view showed. Backfill only the missing rows: existing
+        // statuses are never overwritten, and an instance without an execution
+        // connection stays `unknown` instead of claiming to be idle.
+        db.execute(
+            "INSERT OR IGNORE INTO agents(id,status,detail,updated_at)
+             SELECT id,
+                    CASE WHEN connection_kind='opencode_cli_json' THEN 'idle' ELSE 'unknown' END,
+                    CASE WHEN connection_kind='opencode_cli_json' THEN '대기 중' ELSE '실행 연결이 설정되지 않았습니다' END,
+                    created_at
+             FROM agent_instances",
+            [],
+        )
+        .map_err(err)?;
         // A previous live request cannot be resumed after process death.
         db.execute("UPDATE agents SET status='unknown',detail='이전 실행이 중단됐습니다. 열린 호출은 자동 재개하지 않습니다.',updated_at=?1 WHERE status NOT IN ('idle','completed','failed','cancelled','unknown')", [timestamp()]).map_err(err)?;
         db.execute(
