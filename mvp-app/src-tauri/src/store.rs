@@ -295,16 +295,43 @@ impl Store {
             .map_err(err)?;
         tx.commit().map_err(err)
     }
-    pub fn status(&self, agent: &str, status: &str, detail: &str) -> Result<()> {
+    /// Stores the execution status of a builtin agent or a registered instance
+    /// and reports whether it was actually written. A session can run under an
+    /// `agent_instances` id that has no `agents` row yet, so that row is created
+    /// instead of updating nothing. Unknown ids are not invented as rows and
+    /// leave the revision untouched.
+    pub fn status(&self, agent: &str, status: &str, detail: &str) -> Result<bool> {
+        if agent.trim().is_empty() {
+            return Ok(false);
+        }
         let db = self.db.lock().map_err(err)?;
+        let known: bool = db
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM agents WHERE id=?1 UNION ALL SELECT 1 FROM agent_instances WHERE id=?1)",
+                params![agent],
+                |r| r.get(0),
+            )
+            .map_err(err)?;
+        if !known {
+            return Ok(false);
+        }
         db.execute(
-            "UPDATE agents SET status=?1,detail=?2,updated_at=?3 WHERE id=?4",
-            params![status, detail, timestamp(), agent],
+            "INSERT OR IGNORE INTO agents(id,status,detail,updated_at) VALUES(?1,'idle','대기 중',?2)",
+            params![agent, timestamp()],
         )
         .map_err(err)?;
+        let rows = db
+            .execute(
+                "UPDATE agents SET status=?1,detail=?2,updated_at=?3 WHERE id=?4",
+                params![status, detail, timestamp(), agent],
+            )
+            .map_err(err)?;
+        if rows == 0 {
+            return Ok(false);
+        }
         db.execute("UPDATE meta SET revision=revision+1", [])
             .map_err(err)?;
-        Ok(())
+        Ok(true)
     }
     pub fn audit(&self, kind: &str, payload: Value) -> Result<()> {
         self.db
@@ -548,6 +575,38 @@ mod tests {
         assert!(!s.context().unwrap().contains("cancel this queued input"));
         assert!(s.context().unwrap().contains("new request after cancellation"));
     }
+    #[test]
+    fn status_reports_whether_it_was_stored() {
+        let d = tempfile::tempdir().unwrap();
+        let s = Store::open(&d.path().join("status.db")).unwrap();
+
+        assert!(s.status("codex", "running", "실행 중").unwrap());
+        assert_eq!(
+            s.snapshot().unwrap().agents.iter().find(|a| a.id == "codex").unwrap().status,
+            "running"
+        );
+
+        s.db.lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO agent_instances(id,provider,name,connection_kind,role,source,created_at) VALUES('inst-open-1','opencode','OpenCode CLI','not_configured','lead','user','2026-10-25T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+        assert!(s.status("inst-open-1", "running", "실행 중").unwrap());
+        assert_eq!(
+            s.snapshot().unwrap().agents.iter().find(|a| a.id == "inst-open-1").unwrap().status,
+            "running"
+        );
+
+        let before = s.snapshot().unwrap().revision;
+        assert!(!s.status("ghost-agent", "running", "실행 중").unwrap());
+        assert!(!s.status("   ", "running", "실행 중").unwrap());
+        let after = s.snapshot().unwrap();
+        assert!(after.agents.iter().all(|a| a.id != "ghost-agent"));
+        assert_eq!(after.revision, before);
+    }
+
     #[test]
     fn restores_messages_and_marks_inflight_unknown() {
         let d = tempfile::tempdir().unwrap();

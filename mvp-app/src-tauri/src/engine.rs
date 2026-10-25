@@ -151,7 +151,9 @@ impl Engine {
             self.store.audit("cancel_requested", json!({"runId":run_id,"sessionId":session_id}))?;
             run.snapshot.cancelling = true;
             let agent = self.store.session(session_id)?.agent_instance_id.unwrap_or("codex".into());
-            self.store.status(&agent, "cancelling", "현재 실행을 중단하는 중")?;
+            if !self.store.status(&agent, "cancelling", "현재 실행을 중단하는 중")? {
+                let _ = self.store.audit("agent_status_unmatched", json!({"agent":agent,"status":"cancelling"}));
+            }
             let _ = run.stop.send(true);
         }
         drop(active);
@@ -198,7 +200,13 @@ impl Engine {
         self.snapshot()
     }
     fn state(&self, agent: &str, status: &str, detail: &str) -> Result<()> {
-        self.store.status(agent, status, detail)?;
+        if !self.store.status(agent, status, detail)? {
+            // A session can still point at an instance that was unregistered
+            // while it was running. Keep the turn alive but leave a trace
+            // instead of reporting a status that was never stored.
+            self.store
+                .audit("agent_status_unmatched", json!({"agent":agent,"status":status}))?;
+        }
         self.emit()
     }
     fn error(&self, agent: &str, e: &str) -> Result<()> {
