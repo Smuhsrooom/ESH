@@ -1,5 +1,31 @@
 # ESH 진행 상태와 개발 인계
 
+## Claude Code 호출 계약·stream-json 분류 골격 (2026-10-25, 3단계 첫 조각)
+
+- 선택한 작업: 3단계(추가 CLI 어댑터) 첫 조각 — Claude Code Lead 어댑터의 **비파괴 probe + 프로토콜 골격**. 직전 결정대로 1단계 항목은 더 캐지 않았어. 이번 조각은 **어댑터 등록·세션 경로·Engine 배선 없이** 프로토콜 정의만 세우는 단계야.
+- 먼저 확인한 사실: `C:\Users\서승우\.local\bin\claude.exe`(293,227,168 bytes, 2026-10-20 18:12)가 있고 `~/.claude`도 있어. `claude --version` → `2.1.304 (Claude Code)`. `claude --help`로 플래그를 확인했고 **추측하지 않았어**.
+- 변경 파일:
+  - `mvp-app/src-tauri/src/claude.rs`(신규) — `CONNECTION_KIND = "claude_code_cli"`, `command_args(existing, model)`, `parse_events(output, expected)`, `Answer{session_id,text}`, 회귀 테스트 7개. 모듈 상단에 `#![allow(dead_code)]`를 두고 "아직 등록·실행되지 않는 준비 단계"임을 주석으로 명시해 경고 없이 컴파일돼.
+  - `mvp-app/src-tauri/fixtures/claude-cli-2.1.304-help.txt`(신규) — 이 PC의 설치본이 실제로 출력한 `--help` 전문(313줄, 22,319 bytes)을 그대로 보존. `mvp-app/evidence/`는 `.gitignore` 대상이라 **새 클론에서 컴파일이 깨지므로** 추적되는 `src-tauri/fixtures/`에 두고 `include_str!`로 컴파일 시점에 읽어.
+  - `mvp-app/src-tauri/src/main.rs` — `mod claude;` 한 줄 추가.
+- 계약 내용:
+  - `command_args`는 `-p --output-format stream-json --verbose --permission-mode plan`을 기본으로 하고, 세션이 있으면 `--resume <id>`, 모델을 고르면 `--model <m>`을 덧붙여. 이 6개 플래그와 `stream-json`·`plan` 값은 모두 설치본 `--help`에 실제로 선언된 것만 사용해.
+  - `parse_events`는 NDJSON 한 줄씩 읽어 `session_id`가 줄마다 같아야 하고(기대 세션과 다르면 오류), `assistant` 블록의 `tool_use`가 나오면 **답변하지 않고 실패**하며, 마지막 `result`가 정확히 한 번 있어야 해. 답변 텍스트는 `result.result`를 우선하고 비어 있으면 `assistant`의 `text` 블록을 이어 붙여. `is_error=true`면 오류. 알 수 없는 이벤트 종류와 CRLF는 무시해 최신 CLI가 새 이벤트를 보내도 턴이 깨지지 않아.
+- 검증 (실제 출력):
+  - `npm test` → `test result: ok. 70 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.72s` (기존 63 + 신규 7). 신규: `claude::tests::the_invocation_contract_only_uses_flags_the_installed_cli_declares`, `a_first_turn_resumes_nothing_and_uses_the_default_model`, `the_result_line_is_the_answer_and_the_session_must_not_change`, `an_assistant_text_block_is_only_the_fallback_for_the_answer`, `an_error_result_or_a_tool_call_fails_instead_of_answering`, `a_truncated_or_duplicated_stream_is_rejected`, `unknown_event_types_and_crlf_do_not_break_a_valid_turn` — 모두 `ok`.
+  - `node scripts/verify_external_threads.mjs` → `{"passed":true,"recordedRows":27,"scratchRowsHidden":9,"normalConversationsPreserved":true}`
+  - `npm run build` → `✓ built in 3.37s` (`dist/assets/index-B_6vxOOa.js` 433.29 kB, `index-YBSTmYxd.css` 52.24 kB, `guiProbe-djswdxyz.js` 45.64 kB — 프런트를 건드리지 않아 해시 동일)
+  - Rust 경고는 기존 3건(`agents.rs`의 `Authenticated`·`Required`·`Error`, `Ready` 미사용 variant)과 cargo 증분 lock 삭제 경고 1건뿐이고 `claude.rs`에서 새 경고는 없어.
+- 이 검증의 경계(중요):
+  - `--help` 대조 테스트는 **실제 설치본이 선언한 인터페이스**에 대한 근거야(자기 검사 아님). 반면 **이벤트 형식은 공개 headless/SDK 문서 기준으로 작성했고 이 PC의 실제 `claude -p` 출력으로 확인하지 않았어.** 따라서 이 모듈을 "동작하는 연결"이나 "실제 CLI 연결 성공"으로 집계하지 않아. 어댑터가 등록되지 않았으므로 `probe_agents()`·`Agents` 화면·`active_role`·`support` 값은 전부 이전과 같고, 등록된 Claude 인스턴스는 여전히 `unsupported`/`unavailable`이야(실행 경로가 없는데 `supported`로 승격하지 않으려고 이번에 등록하지 않았어).
+  - 실제 `claude -p` 1회 캡처는 프롬프트가 외부 API로 나가고 사용자 계정 사용량을 쓰므로 **승인 대기**로 남겨. 이 환경 샌드박스는 `claude --help` 실행 중에도 `reg.exe`를 차단했다고 보고했어(출력·종료코드는 정상). 실제 턴 검증이 이 샌드박스에서 온전히 재현될지도 함께 확인해야 해.
+- 남은 문제:
+  1. **승인 대기**: 실제 `claude -p` 1회로 stream-json 원문을 `evidence/`에 캡처해 파서를 실제 형식으로 확정하는 일(외부 데이터 전송 + 계정 사용량).
+  2. 어댑터 미등록 — `ClaudeCodeAdapter`/`LeadAdapter`/`LeadSession` 구현, `register_agent_instance`의 `claude_code`→`claude_code_cli` 매핑, 세션 생성 경로(`create_session` provider), Engine `claude_turn` 배선이 모두 남아 있어. 이걸 하려면 `support`가 실제 실행 경로와 일치하도록 등록·세션·배선을 한 묶음으로 해야 해.
+  3. 도구 정책 미확정 — `--permission-mode plan`은 설치본이 선언한 모드 중 보수적 선택일 뿐, 대화 전용 계약을 실제로 지키는지 검증되지 않았어. `--permission-prompts none`·`--disallowedTools` 조합은 실제 실행으로 확인한 뒤 정해야 해.
+  4. 1단계 잔여 4건(GUI 실행 확인, `tauri-plugin-single-instance` 내부 경합, 원본 세션 전역 잠금, 종료 중 거절의 WebView 재현)은 그대로 차단 상태야.
+- 다음 작업: (a) 승인을 받으면 `claude -p` 1회 캡처로 `parse_events`를 실제 형식에 맞추고, (b) 그 결과를 근거로 `ClaudeCodeAdapter` 등록 + `claude_code_cli` 매핑 + `claude_turn` 배선을 한 조각으로 진행. 승인 없이는 (b)만 먼저 하되 `support` 표기를 실행 경로와 함께 맞출 것.
+
 ## 단계 게이트 결정 — 1단계 반복 중단, 3단계로 이동 (2026-10-25)
 
 - 배경: 1~14회차 자동 실행이 계속 1단계(기존 기능 안정화) 안에서 작은 정합성 결함을 찾아 고치는 데 머물렀어. 사용자가 이 반복을 지적했고, 앞으로 1단계 항목을 더 캐지 않고 3단계(추가 CLI 어댑터)로 넘어가.
