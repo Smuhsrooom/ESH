@@ -1,5 +1,19 @@
 # ESH 진행 상태와 개발 인계
 
+## 등록·해제 결과의 snapshot 반영 (2026-10-25)
+
+- 선택한 작업: 로드맵 1단계(기존 기능 안정화) 잔여 항목 중 앞선 회차가 남긴 "등록 해제 시 `agents` 행 정리" 확인. 정리 자체는 `registry.rs`의 `unregister_agent_instance`가 이미 `DELETE FROM agents`로 수행하고 있었지만, 그 삭제가 `agent_instances` 삭제와 별개 문장이라 두 번째 삭제가 실패하거나 그 사이에 프로세스가 죽으면 인스턴스 없는 `agents` 행이 남았어. 게다가 두 store 함수 모두 `meta.revision`을 올리지 않고 Tauri 명령도 `emit()`을 호출하지 않아, 열려 있는 WebView는 삭제된 인스턴스의 상태와 `에이전트` 배지 개수를 다음 무관한 이벤트까지 계속 보여줬어(`main.tsx`의 `snapshot.agents.length`, `AgentsView.tsx`의 `snapshot.agents.find`).
+- 변경 파일: `mvp-app/src-tauri/src/registry.rs`(`register_agent_instance`·`unregister_agent_instance`를 트랜잭션으로 묶고 `meta.revision` 증가, 회귀 테스트 1개), `mvp-app/src-tauri/src/main.rs`(두 명령이 성공 후 `engine.emit()` 호출).
+- 동작 보존: `agent_instances`·`agents` 스키마, 기존 두 builtin 행, `chat_sessions` 참조 검사(사용 중 세션이 있으면 해제 거부), `tool_deliveries`, Blocking Delegation, `request_arch_review`, archReview/latestUserRequirements 분리, 종료 순서와 접수 차단, Arch 타임아웃 120초(범위 30~600)는 변경하지 않았어. 새 DB 마이그레이션은 없고 사용자 메시지·세션·컨텍스트는 건드리지 않아. `emit()`은 실패해도 등록·해제 자체를 되돌리지 않도록 반환값만 전달해.
+- 검증 (실제 출력):
+  - `npm test` → `test result: ok. 54 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.70s` (기존 53 + 신규 1, `registry::tests::registration_and_removal_are_visible_to_snapshot_consumers ... ok`)
+  - `node scripts/verify_external_threads.mjs` → `{"passed":true,"recordedRows":27,"scratchRowsHidden":9,"normalConversationsPreserved":true}`
+  - `npm run build` → `✓ built in 2.76s` (`dist/assets/index-B_6vxOOa.js` 433.29 kB, `index-YBSTmYxd.css` 52.24 kB)
+- 신규 테스트 내용: OpenCode Lead 등록 직후 `revision`이 증가하고 `agents`에 `idle` 행이 생겨 개수가 2→3이 되는지, `status(..., "running", ...)`가 `true`인지, 해제 후 `revision`이 다시 증가하고 해당 `agents` 행이 사라져 개수가 2로 돌아가며 `agent_instances`에도 남지 않고 실행 파일은 그대로인지를 확인해. 저장소 계층만 검사하고 Tauri 명령 배선과 `emit()` 전달은 컴파일과 코드 확인으로만 검증했어.
+- 이번 결과는 Rust 단위·분류 회귀 검사야. 실제 Tauri WebView에서 등록·해제 직후 배지와 상세 패널이 즉시 갱신되는지, 삭제된 인스턴스가 선택된 상태에서 패널이 닫히는지는 확인하지 않았어. `python scripts/verify_*.py`와 데스크톱 빌드는 실행하지 않았어.
+- 남은 문제: 이 수정 이전에 이미 생긴 고아 `agents` 행은 시작 시 정리 경로가 없어 그대로 남아(배지 개수에만 영향) 있어. 원본 세션 동시 사용을 막는 전역 잠금도 여전히 없어.
+- 다음 작업: 시작 시 `agent_instances`에 없는 `agents` 행 정리 여부 결정, 또는 "종료 중 거절"을 실제 WebView에서 재현하는 검증 경로 마련.
+
 ## 에이전트 상태의 무음 성공 제거 (2026-10-25)
 
 - 선택한 작업: 로드맵 1단계(기존 기능 안정화) 잔여 항목 중 앞선 회차가 남긴 "`Store::status`의 무음 성공". `status`는 `UPDATE agents ... WHERE id=?`의 갱신 행 수를 보지 않고 `meta.revision`을 올린 뒤 `Ok(())`를 돌려줬어. 세션의 `agent_instance_id`(등록 인스턴스 ID, 예: OpenCode 등록 UUID)로 호출되면 `agents` 표에 해당 행이 없어 아무것도 저장되지 않았는데도 호출부는 저장된 것으로 처리했어. `cancel`·`error`·`state`가 모두 이 경로를 쓰고, `AgentsView.tsx`는 이미 `snapshot.agents`에서 인스턴스 ID로 상태를 찾고 있어 화면에는 값이 없어 `idle`로 대체되고 있었어.
