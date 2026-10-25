@@ -1,5 +1,22 @@
 # ESH 진행 상태와 개발 인계
 
+## OpenCode 턴 확정 순서 수정 — 취소된 턴이 외부 세션을 옮기지 않게 (2026-10-25)
+
+- 선택한 작업: 1단계(기존 기능 안정화) 범위의 OpenCode Lead 턴 마감 순서. `engine.rs`의 `opencode_turn`은 CLI 답변을 받은 뒤 **먼저** `bind_codex_session`으로 `chat_sessions.thread_id`·`codex_session_id`를 새 외부 세션으로 옮기고, **그다음** `confirm_turn_start`로 사용자 메시지의 턴 결합을 확정했어. `confirm_turn_start`는 `delivery='queued'`인 행만 갱신하고 아니면 오류를 돌려주므로, CLI가 답하는 사이에 사용자가 중단해 메시지가 `cancelled`가 되면 (1) 외부 세션 포인터는 이미 새 세션으로 이동하고 (2) 답변은 저장되지 않아. 그 결과 다음 턴은 로컬 기록에 없는 답변을 포함한 외부 세션을 이어쓰게 돼 로컬 기록과 CLI 맥락이 어긋났어.
+- 변경 파일:
+  - `mvp-app/src-tauri/src/engine.rs` — 마감 3단계를 `commit_opencode_answer(store, session_id, user_id, answer) -> Result<()>`로 분리하고 순서를 `confirm_turn_start` → `bind_codex_session` → 답변 저장으로 바꿨어. `opencode_turn`은 이 함수를 호출하고 이어서 `state(..., "completed")`를 수행해. 성공 경로에서 쓰는 행과 값은 이전과 같아(같은 메시지 2건, `main`/`answer`/`delivered`, 같은 `thread_id`·`codex_session_id`). 회귀 테스트 2개 추가.
+- 동작 보존: Blocking Delegation, `request_arch_review`, `archReview`/`latestUserRequirements` 구조적 분리, `tool_deliveries` 상태 전이, 종료 순서, Arch 타임아웃 120초(범위 30~600), 단일 worker, DB 스키마·`user_version=6`, 사용자 메시지·세션·컨텍스트는 변경하지 않았어. 바뀐 것은 취소로 확정이 실패할 때 외부 세션 포인터를 건드리지 않는다는 점뿐이야.
+- 검증 (실제 출력):
+  - `npm test` → `test result: ok. 61 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.46s` (기존 59 + 신규 2, `engine::opencode_commit_tests::a_finished_turn_binds_the_external_session_and_stores_the_answer ... ok`, `engine::opencode_commit_tests::a_cancelled_turn_neither_moves_the_external_session_nor_stores_an_answer ... ok`)
+  - `node scripts/verify_external_threads.mjs` → `{"passed":true,"recordedRows":27,"scratchRowsHidden":9,"normalConversationsPreserved":true}`
+  - `npm run build` → `✓ built in 2.38s` (`dist/assets/index-B_6vxOOa.js` 433.29 kB, `index-YBSTmYxd.css` 52.24 kB, `guiProbe-djswdxyz.js` 45.64 kB)
+  - 경고는 기존 2건(`agents.rs`의 `Authentication`·`Availability` 미사용 variant)뿐이고 새 경고는 없어.
+- 신규 테스트 내용: (1) 정상 턴에서 `chat_sessions.thread_id`·`codex_session_id`가 외부 세션 ID로 저장되고, 사용자 메시지가 `delivered`+턴 결합되며, 답변이 `opencode`/`main`/`delivered`로 1건 추가되는지 확인해. (2) `cancel_queued`로 메시지를 `cancelled`로 만든 뒤 마감하면 오류가 나고 `thread_id`는 `None`, `codex_session_id`는 빈 값 그대로이며 답변 메시지가 생기지 않는지 확인해. 저장소·순수 함수 계층만 검사해.
+- 이번 결과는 Rust 단위 회귀 검사야. 실제 OpenCode CLI가 답하는 도중 중단을 걸어 이 경합을 재현한 것은 아니고, `opencode_turn`의 배선(어느 시점에 함수를 부르는지)은 컴파일과 코드 확인으로만 검증했어. 실제 WebView·`python scripts/verify_*.py`·데스크톱 빌드는 실행하지 않았어(변경이 Rust 백엔드이고 실행 중인 앱을 건드리지 않으려고).
+- 지난 회차가 제안한 "Mock에 프로세스 종료 불명확 시나리오 추가"는 **하지 않았어**. 그 경로는 이미 `cli.rs`의 실제 stdio 상대 검사(`mock_stdio_keeps_one_tool_reply_on_the_original_rpc_id`: 쓰기 실패 후 `call-2` 행이 `unknown`, 재전송 없음)와 `characterization_tests::review_records_and_tool_delivery_survive_restart_without_replaying_open_call`(재시작 후 `unknown`)이 더 강한 형태로 덮고 있어. Mock에 같은 전이를 흉내 내면 Mock 자신의 동작을 검사하는 중복이 되고 실제 어댑터 증거로 오인될 수 있어서 추가하지 않았어.
+- 남은 문제: (a) 1단계 잔여 4건(GUI 실행 확인, `tauri-plugin-single-instance` 내부 경합, 원본 세션 전역 잠금=**승인 대기**, 종료 중 거절의 WebView 재현)은 그대로 차단 상태야. (b) OpenCode 턴에서 CLI가 답을 만든 뒤 확정이 실패하면 그 답변 텍스트는 여전히 저장되지 않아(중단된 턴의 답변을 남길지 여부는 UX 결정이 필요해). (c) `bind_codex_session`은 세션 행이 없어도 조용히 성공하는 `UPDATE`야(호출 경로상 유효한 세션만 오지만 무음 성공 유형이 남아 있어).
+- 다음 작업: (a)의 4건 중 사용자 환경 확인이 필요한 항목 정리, 또는 (b) 중단된 OpenCode 턴의 답변 보존 여부 결정. 2단계 Mock 체크리스트는 "단일 worker 직렬성"만 `AppHandle` 의존이라 단위 검사로 닫을 수 없는 상태야.
+
 ## 공개 답변 스트림의 Mock 검증과 늦은 턴 이벤트 차단 (2026-10-25)
 
 - 선택한 작업: 1단계 회귀 표의 "Codex 사용자 턴" 중 **공개 답변 스트림 경로**, 그리고 2단계 Mock Agent 체크리스트의 "공개 답변"·"늦은 응답" 항목. `engine.rs`의 `codex_turn`은 `item/started`·`item/agentMessage/delta`·`item/completed`를 인라인으로 처리하면서 스레드/턴 일치를 분기마다 따로 비교했어. 이 판정이 `Engine`(AppHandle) 안에 있어 단위 테스트가 닿지 않았고, 그래서 "늦은 턴 이벤트가 현재 답변에 섞이지 않는다"는 계약에는 회귀 검사가 없었어. Mock Agent도 공개 답변 이벤트를 만들지 못해 그 경로를 스크립트로 재현할 수 없었어.
