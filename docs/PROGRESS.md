@@ -1,5 +1,20 @@
 # ESH 진행 상태와 개발 인계
 
+## 자동화 인계 문서 작성 (2026-10-25)
+
+- `docs/AUTOMATION_HANDOFF.md`를 추가했어. 특정 도구나 프로모션에 종속되지 않도록 "한 회차를 어떻게 수행하는가" 기준으로 정리했고, 붙여넣기용 실행 프롬프트, 검증 명령과 판정 기준, 안전 정책, 도구별 복구 방법, 실측 함정 표를 담았어.
+- 실측 근거: MausBot 루틴은 `access`가 `read-and-draft` 하나로 고정돼 있고 실행 시 파일 쓰기가 차단돼. 테스트 실행에서 루틴 출력이 `쓰기 불가`였고 `D:\프로젝트\ESH-codex\.routine-write-test.txt`는 생성되지 않았어. 그래서 코드 개발 자동화는 WorkBuddy(1시간 간격)가 맡고, MausBot 루틴은 읽기 전용 상태 점검(6시간 간격)으로 용도를 바꿨어.
+- 이번 작업은 문서 추가뿐이라 코드·테스트를 변경하지 않았어. `npm test`를 다시 실행하지 않았고, 직전 회차의 50 passed 기록을 이번 결과로 재집계하지 않아.
+- 다음 작업: 로드맵 1단계 잔여 항목인 "종료·큐·원본 동시 사용 실패 재현" 정리부터 착수.
+
+## 브랜치 동기화와 병합 충돌 해결 (2026-10-25)
+
+- `bot/codex-impl`이 main보다 뒤처져 있어 `git merge main`을 실행했어. `docs/PROGRESS.md`, `mvp-app/src-tauri/src/mock_agent.rs` 두 파일에서 충돌이 났어.
+- 두 충돌 모두 main 쪽을 채택했어. PROGRESS는 OpenCode 항목 3개까지 포함한 최신 기록이었고, `mock_agent.rs`는 취소 채널 송신자를 유지하는 main의 수정이 타임아웃 테스트를 실제로 검증해. 브랜치 커밋 `6578414`의 테스트 분리 내용은 main에 동등한 리팩터가 이미 들어가 중복이었어.
+- 검증: `mvp-app/`에서 `npm test` → **50개 통과, 0개 실패** (`test result: ok. 50 passed; 0 failed`).
+- 이번 실행은 단위 테스트만 돌렸어. 실제 Codex·Antigravity CLI, Tauri WebView, OpenCode 실행은 호출하지 않았고 기존 실제 연결 성공 기록을 이번 결과로 재집계하지 않아.
+- 다음 작업: 로드맵 1단계(기존 기능 안정화) 잔여 항목 중 "종료·큐·원본 동시 사용 실패 재현" 정리부터 착수.
+
 ## 테스트 전용 Mock Agent 재검증 (2026-10-25)
 
 - 현재 `mvp-app/src-tauri/src/mock_agent.rs`는 `main.rs`의 `#[cfg(test)]`에서만 컴파일돼. 운영 `registered()`에는 Codex, Antigravity, OpenCode 세 어댑터가 있고 Mock은 포함되지 않아. 격리 테스트 DB의 Mock 등록 행도 활성 역할이 없는 것으로 확인했어.
