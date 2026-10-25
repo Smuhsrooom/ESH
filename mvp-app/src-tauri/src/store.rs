@@ -123,6 +123,18 @@ impl Store {
             )
             .map_err(err)?;
         }
+        // `agents` rows are execution status derived from the registry, not user
+        // data. A build that removed a registration without deleting its status
+        // row left those rows behind, and nothing else ever removed them: they
+        // kept counting in `snapshot.agents.length`, which `main.tsx` uses for the
+        // Agents badge, while the list only renders builtin ids and instances that
+        // still exist. Drop only rows whose instance is gone; the two builtin rows
+        // and every registered instance keep theirs.
+        db.execute(
+            "DELETE FROM agents WHERE id NOT IN (SELECT id FROM agent_instances) AND id NOT IN ('codex','antigravity')",
+            [],
+        )
+        .map_err(err)?;
         // A previous live request cannot be resumed after process death.
         db.execute("UPDATE agents SET status='unknown',detail='이전 실행이 중단됐습니다. 열린 호출은 자동 재개하지 않습니다.',updated_at=?1 WHERE status NOT IN ('idle','completed','failed','cancelled','unknown')", [timestamp()]).map_err(err)?;
         db.execute(
@@ -605,6 +617,35 @@ mod tests {
         let after = s.snapshot().unwrap();
         assert!(after.agents.iter().all(|a| a.id != "ghost-agent"));
         assert_eq!(after.revision, before);
+    }
+
+    #[test]
+    fn open_drops_status_rows_whose_instance_is_gone() {
+        // A registration removed by an older build could leave its `agents` row
+        // behind. Those rows are not user data, they only inflate the Agents badge
+        // (`snapshot.agents.length`), so reopening the store removes them while
+        // keeping the two builtin rows and every instance that still exists.
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("orphans.db");
+        {
+            let s = Store::open(&p).unwrap();
+            {
+                let db = s.db.lock().unwrap();
+                db.execute("INSERT INTO agent_instances(id,provider,name,connection_kind,role,source,created_at) VALUES('inst-keep','claude_code','Claude Code','not_configured','lead','user','2026-10-25T00:00:00Z')", []).unwrap();
+                db.execute("INSERT INTO agents(id,status,detail,updated_at) VALUES('inst-keep','idle','대기 중','2026-10-25T00:00:00Z')", []).unwrap();
+                db.execute("INSERT INTO agents(id,status,detail,updated_at) VALUES('inst-orphan','running','실행 중','2026-10-25T00:00:00Z')", []).unwrap();
+            }
+            assert_eq!(s.snapshot().unwrap().agents.len(), 4);
+        }
+        let s = Store::open(&p).unwrap();
+        let first = s.snapshot().unwrap();
+        let ids = first.agents.iter().map(|a| a.id.as_str()).collect::<Vec<_>>();
+        assert_eq!(ids, vec!["antigravity", "codex", "inst-keep"]);
+        assert!(first.messages.is_empty());
+        drop(s);
+        // Reopening is idempotent and keeps the rows that still have an owner.
+        let s = Store::open(&p).unwrap();
+        assert_eq!(s.snapshot().unwrap().agents.len(), 3);
     }
 
     #[test]
