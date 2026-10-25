@@ -10,7 +10,7 @@
   - `node scripts/verify_external_threads.mjs` → `{"passed":true,"recordedRows":27,"scratchRowsHidden":9,"normalConversationsPreserved":true}`
   - `npm run build` → `✓ built in 2.46s` (`dist/assets/index-B_6vxOOa.js` 433.29 kB, `index-YBSTmYxd.css` 52.24 kB, `guiProbe-djswdxyz.js` 45.64 kB)
 - 신규 테스트 내용: 등록 전 `agents` 2개 → Claude Code(미지원) 등록 후 3개이고 해당 행이 정확히 1개이며 상태가 `unknown`인지, 그 행을 지워 이전 빌드 상태를 흉내 낸 뒤 재개방하면 `Store::open`이 `unknown`/`실행 연결이 설정되지 않았습니다`로 보충하고 builtin `codex`는 `idle`을 유지하는지, 한 번 더 재개방해도 3개로 같은지(멱등), 등록 해제 후 2개로 돌아가는지를 확인해. 저장소 계층만 검사해.
-- 이번 결과는 Rust 단위·분류 회귀 검사야. 실제 Tauri WebView에서 배지 숫자가 3으로 바뀌고 목록 항목 수와 같은지는 확인하지 않았어. `python scripts/verify_*.py`와 데스크톱 빌드는 실행하지 않았어(이 worktree에는 `src-tauri/target/debug`에 실행 파일이 없어 새로 빌드해야 함).
+- 이번 결과는 Rust 단위·분류 회귀 검사야. 실제 Tauri WebView에서 배지 숫자가 3으로 바뀌고 목록 항목 수와 같은지는 확인하지 않았어. `python scripts/verify_*.py`도 실행하지 않았어. 이 worktree의 `mvp-app/src-tauri/target/debug/esh-chat-mvp4.exe`는 15:25에 사용자 요청으로 빌드된 이전 트리 산출물이라 이번 변경을 포함하지 않아. 이번 변경은 Rust 백엔드에 있어 화면 확인에는 재빌드가 필요하고, 방금 만들어진 실행 파일을 덮어쓰지 않으려고 데스크톱 빌드를 실행하지 않았어.
 - 남은 문제: 원본 세션 동시 사용을 막는 전역 잠금은 여전히 없어(구조 변경이라 **승인 대기**). "종료 중 거절"을 실제 WebView에서 재현하는 검증 경로도 아직 없어. 실행 연결이 없는 등록의 `unknown` 상태는 `AgentsView` 상세에서 `상태 확인 필요`로 보이지만 이 화면 문구는 WebView에서 확인하지 않았어.
 - 다음 작업: "종료 중 거절"을 실제 WebView에서 재현하는 검증 경로 마련, 또는 원본 세션 전역 잠금 설계 승인 요청.
 
