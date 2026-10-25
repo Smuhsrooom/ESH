@@ -459,6 +459,44 @@ impl Store {
             busy_session_id: self.busy_session.lock().map_err(err)?.clone(),
         })
     }
+    /// Reads the queued requirements a pending review still has to deliver and
+    /// the session version they belong to in one lock. Reading them separately
+    /// let a message submitted between the two reads land in one half of the
+    /// envelope only: `latestUserRequirements` advertised a version whose
+    /// `messages` list did not contain it, or the reverse.
+    pub fn pending_requirements(&self, session: &str) -> Result<(i64, Vec<Message>)> {
+        let db = self.db.lock().map_err(err)?;
+        let version: i64 = db
+            .query_row("SELECT version FROM chat_sessions WHERE id=?1", [session], |r| r.get(0))
+            .map_err(|_| "세션을 찾을 수 없습니다".to_string())?;
+        let mut stmt = db
+            .prepare("SELECT sequence,id,speaker,content,created_at,delivery,version,is_error,channel,kind,room_id,thread_id,turn_id,collaboration_id,chat_session_id FROM messages WHERE speaker='user' AND chat_session_id=?1 AND delivery='queued' AND substr(content,1,6)!='@arch ' ORDER BY sequence")
+            .map_err(err)?;
+        let messages = stmt
+            .query_map([session], |r| {
+                Ok(Message {
+                    sequence: r.get(0)?,
+                    id: r.get(1)?,
+                    speaker: r.get(2)?,
+                    content: r.get(3)?,
+                    created_at: r.get(4)?,
+                    delivery: r.get(5)?,
+                    version: r.get(6)?,
+                    is_error: r.get(7)?,
+                    channel: r.get(8)?,
+                    kind: r.get(9)?,
+                    room_id: r.get(10)?,
+                    thread_id: r.get(11)?,
+                    turn_id: r.get(12)?,
+                    collaboration_id: r.get(13)?,
+                    chat_session_id: r.get(14)?,
+                })
+            })
+            .map_err(err)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(err)?;
+        Ok((version, messages))
+    }
     pub fn cancel_queued(&self, session: &str) -> Result<()> {
         let mut db = self.db.lock().map_err(err)?;
         let tx = db.transaction().map_err(err)?;
@@ -634,6 +672,53 @@ mod tests {
         let after = s.snapshot().unwrap();
         assert!(after.agents.iter().all(|a| a.id != "ghost-agent"));
         assert_eq!(after.revision, before);
+    }
+
+    #[test]
+    fn pending_requirements_share_one_version_and_skip_arch_and_foreign_sessions() {
+        // The review envelope pairs this version with this list, so they have to
+        // come from the same read. Direct `@arch` questions belong to the legacy
+        // channel and other sessions' queued input must never travel with them.
+        let d = tempfile::tempdir().unwrap();
+        let s = Store::open(&d.path().join("requirements.db")).unwrap();
+        let other = s.create_session("default", "other").unwrap();
+        let first = s.message("user", "first requirement", false).unwrap();
+        let arch = s
+            .routed_message(
+                "user",
+                "@arch direct question",
+                false,
+                Route {
+                    channel: "legacy",
+                    kind: "user_message",
+                    chat_session_id: Some("default-session".into()),
+                    ..Route::default()
+                },
+            )
+            .unwrap();
+        let foreign = s
+            .routed_message(
+                "user",
+                "other session work",
+                false,
+                Route {
+                    channel: "main",
+                    kind: "user_message",
+                    chat_session_id: Some(other.id.clone()),
+                    ..Route::default()
+                },
+            )
+            .unwrap();
+        let (version, pending) = s.pending_requirements("default-session").unwrap();
+        assert_eq!(version, s.session_version("default-session").unwrap());
+        assert_eq!(pending.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), [first.id.as_str()]);
+        assert!(pending.iter().all(|m| m.id != arch.id && m.id != foreign.id));
+        // A delivered requirement stops being pending, but the version keeps growing.
+        s.delivery(&[first.id.clone()], "delivered").unwrap();
+        let (after_version, after) = s.pending_requirements("default-session").unwrap();
+        assert!(after.is_empty());
+        assert_eq!(after_version, version);
+        assert!(s.pending_requirements("missing-session").is_err());
     }
 
     #[test]

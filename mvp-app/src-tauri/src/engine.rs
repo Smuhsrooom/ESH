@@ -2,7 +2,7 @@ use crate::{
     agents::{registered, AgentRole, CodexLeadSession, LeadAdapter, LeadSession, ReviewAdapter, ANTIGRAVITY, CODEX},
     store::{err, ActiveRunSnapshot, Message, Result, Route, Snapshot, Store},
 };
-use serde_json::json;
+use serde_json::{json, Value};
 use crate::models::{CodexModel, ModelSettings};
 use std::{
     future::Future,
@@ -46,6 +46,23 @@ pub(crate) fn ensure_accepting(accepting: &AtomicBool) -> Result<()> {
     } else {
         Err("앱을 종료 중이어서 새 작업을 받을 수 없습니다".into())
     }
+}
+/// Builds the Blocking Delegation payload that goes back on the original open
+/// tool call. `archReview` and `latestUserRequirements` stay separate keys so
+/// Codex can apply the user's newest requirements first, and `reviewIsStale`
+/// compares the version captured when the review started with the version the
+/// delivered requirements belong to. Both versions come from one store read, so
+/// the flag can never disagree with the `messages` list next to it.
+fn review_envelope(
+    review: Value,
+    review_version: i64,
+    requirements_version: i64,
+    pending: Vec<Message>,
+) -> Value {
+    json!({"kind":"arch_review_delivery","archReview":review,
+        "latestUserRequirements":{"conversationVersion":requirements_version,"messages":pending},
+        "reviewIsStale":review_version!=requirements_version,
+        "processingOrder":["latestUserRequirements","archReview"]})
 }
 fn interrupt_consumed_input(store: &Store, id: &str) -> Result<bool> {
     store.interrupt_queued(id)
@@ -833,22 +850,9 @@ impl Engine {
                             )
                         }
                     };
-                    let latest = self.store.snapshot()?;
-                    let pending = latest
-                        .messages
-                        .iter()
-                        .filter(|m| {
-                            m.speaker == "user"
-                                && m.chat_session_id == user.chat_session_id
-                                && m.delivery == "queued"
-                                && !m.content.starts_with("@arch ")
-                        })
-                        .cloned()
-                        .collect::<Vec<_>>();
+                    let (requirements_version, pending) = self.store.pending_requirements(&user.chat_session_id)?;
                     let ids = pending.iter().map(|m| m.id.clone()).collect::<Vec<_>>();
-                    let envelope = json!({"kind":"arch_review_delivery","archReview":review,
-                        "latestUserRequirements":{"conversationVersion":self.store.session_version(&user.chat_session_id)?,"messages":pending},
-                        "reviewIsStale":review_version!=self.store.session_version(&user.chat_session_id)?,"processingOrder":["latestUserRequirements","archReview"]});
+                    let envelope = review_envelope(review, review_version, requirements_version, pending);
                     self.state("codex", "resuming", "최신 요구사항과 리뷰를 전달하는 중")?;
                     rpc.reply_to_tool_call(&event, envelope, success).await?;
                     self.store.bind_messages(
@@ -933,6 +937,40 @@ mod compact_event_tests {
         assert!(!matches_compaction_item(&completed, "thread-b", "turn-a", Some("item-a"), "item/completed"));
         assert!(!matches_compaction_item(&completed, "thread-a", "turn-b", Some("item-a"), "item/completed"));
         assert!(!matches_compaction_item(&completed, "thread-a", "turn-a", Some("item-b"), "item/completed"));
+    }
+}
+
+#[cfg(test)]
+mod envelope_tests {
+    use super::review_envelope;
+    use serde_json::json;
+
+    #[test]
+    fn review_and_latest_requirements_stay_separate_with_an_explicit_staleness_flag() {
+        // Nothing arrived while Arch was reviewing: the review is current and the
+        // requirements field is still present, empty, with its own version.
+        let fresh = review_envelope(json!({"status":"success","answer":"review"}), 3, 3, vec![]);
+        assert_eq!(fresh["kind"], "arch_review_delivery");
+        assert_eq!(fresh["archReview"]["answer"], "review");
+        assert_eq!(fresh["latestUserRequirements"]["conversationVersion"], 3);
+        assert_eq!(fresh["latestUserRequirements"]["messages"], json!([]));
+        assert_eq!(fresh["reviewIsStale"], false);
+        assert_eq!(fresh["processingOrder"], json!(["latestUserRequirements", "archReview"]));
+
+        // A message that arrived during the review makes it stale and travels in
+        // its own field: it must not be merged into archReview, and the review
+        // result itself must not be reported as a fresh verification.
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(&dir.path().join("envelope.sqlite")).unwrap();
+        let late = store.message("user", "new requirement", false).unwrap();
+        let stale = review_envelope(json!({"status":"success","answer":"old review"}), 2, 3, vec![late]);
+        assert_eq!(stale["reviewIsStale"], true);
+        assert_eq!(stale["latestUserRequirements"]["conversationVersion"], 3);
+        assert_eq!(stale["latestUserRequirements"]["messages"][0]["content"], "new requirement");
+        assert_eq!(stale["latestUserRequirements"]["messages"][0]["delivery"], "queued");
+        assert_eq!(stale["archReview"]["answer"], "old review");
+        assert!(stale["archReview"].get("messages").is_none());
+        assert!(stale["archReview"].get("latestUserRequirements").is_none());
     }
 }
 
