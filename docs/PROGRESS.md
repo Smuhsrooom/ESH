@@ -1,5 +1,11 @@
 # ESH 진행 상태와 개발 인계
 
+## 테스트 전용 Mock Agent 재검증 (2026-10-25)
+
+- 현재 `mvp-app/src-tauri/src/mock_agent.rs`는 `main.rs`의 `#[cfg(test)]`에서만 컴파일돼. 운영 `registered()`에는 Codex, Antigravity, OpenCode 세 어댑터가 있고 Mock은 포함되지 않아. 격리 테스트 DB의 Mock 등록 행도 활성 역할이 없는 것으로 확인했어.
+- Reviewer 정상 응답의 질문·버전·ID, 실패, 잘못된 ID, 호출자 제한 시간 초과, 실행 중·사전 취소를 독립적으로 검사해. 기존 타임아웃 테스트는 취소 송신자가 먼저 해제되면 제한 시간을 검증하지 못하므로 송신자를 유지하도록 수정했어. 기존 Lead 세션 열기·턴·취소·재연결 후 재개와 원래 열린 도구 호출에 대한 1회 응답 검사도 유지했어.
+- 현재 `main`에서 `npm test` **50개 통과, 0개 실패**. `node scripts/verify_external_threads.mjs`도 통과했어. 이번 실행은 in-process Mock·단위/분류 회귀 검사이며 실제 Codex·Antigravity CLI, API, Tauri WebView는 호출하지 않았어. 운영 `engine.rs`는 여전히 기존 Codex·Antigravity 실행 경로를 직접 사용하므로 범용 Registry 기반 실행 디스패치까지 검증한 것은 아니야.
+
 ## OpenCode 세션 모델 선택 (2026-10-25)
 
 - `mvp-app/src-tauri/src/opencode.rs`에서 등록된 CLI의 `models --pure` 출력을 제한 시간과 크기 검사를 두고 읽어 `provider/model` 및 `nvidia/deepseek-ai/deepseek-r1` 같은 멀티 슬래시 ID를 표시해. 빈 세그먼트·공백·제어 문자가 있는 ID는 거부해. `mvp-app/src/main.tsx`는 목록 조회 실패를 표시하고 다시 조회할 수 있으며, 저장 모델의 목록 누락은 해당 세션의 조회가 완료된 뒤에만 보여줘.

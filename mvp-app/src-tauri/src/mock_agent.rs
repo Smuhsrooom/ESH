@@ -155,24 +155,51 @@ mod tests {
         let instances = store.list_agent_instances().unwrap();
         assert_eq!(instances.iter().filter(|i| i.provider == "mock_agent").count(), 2);
         assert!(instances.iter().filter(|i| i.provider == "mock_agent").all(|i| i.connection == "mock_in_process" && i.support == "supported"));
+        assert!(instances.iter().filter(|i| i.provider == "mock_agent").all(|i| i.active_role.is_none()));
         assert!(store.register_mock_for_test("mock-lead", "lead").is_err());
         assert!(store.register_mock_for_test("mock-invalid", "other").is_err());
     }
 
     #[tokio::test]
-    async fn reviewer_success_failure_timeout_cancel_and_wrong_id() {
+    async fn reviewer_success_preserves_question_version_and_id() {
         let (_dir, store) = store();
-        let (cancel_tx, cancel_rx) = watch::channel(false);
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
         let success = MockAgent::new(ReviewOutcome::Success);
-        let result = success.review(store.clone(), "review question", 7, cancel_rx.clone()).await.unwrap();
+        let result = success.review(store, "review question", 7, cancel_rx).await.unwrap();
         assert_eq!(result["reviewId"], "mock-review-7");
         assert_eq!(result["answer"], "review question");
+        assert_eq!(result["conversationVersion"], 7);
+    }
+
+    #[tokio::test]
+    async fn reviewer_failure_is_not_a_successful_review() {
+        let (_dir, store) = store();
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
         let failure = MockAgent::new(ReviewOutcome::Failure);
-        assert!(failure.review(store.clone(), "question", 7, cancel_rx.clone()).await.unwrap_err().contains("failed"));
+        assert!(failure.review(store, "question", 7, cancel_rx).await.unwrap_err().contains("failed"));
+    }
+
+    #[tokio::test]
+    async fn reviewer_rejects_wrong_review_id() {
+        let (_dir, store) = store();
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
         let wrong = MockAgent::new(ReviewOutcome::WrongId);
-        assert!(wrong.review(store.clone(), "question", 7, cancel_rx.clone()).await.unwrap_err().contains("리뷰 ID"));
+        assert!(wrong.review(store, "question", 7, cancel_rx).await.unwrap_err().contains("리뷰 ID"));
+    }
+
+    #[tokio::test]
+    async fn reviewer_timeout_remains_pending_until_caller_deadline() {
+        let (_dir, store) = store();
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let waiting = MockAgent::new(ReviewOutcome::Wait);
+        assert!(tokio::time::timeout(Duration::from_millis(20), waiting.review(store, "question", 7, cancel_rx)).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn reviewer_cancellation_interrupts_pending_and_rejects_pre_cancelled_request() {
+        let (_dir, store) = store();
+        let (cancel_tx, cancel_rx) = watch::channel(false);
         let waiting = Arc::new(MockAgent::new(ReviewOutcome::Wait));
-        assert!(tokio::time::timeout(Duration::from_millis(20), waiting.review(store.clone(), "question", 7, cancel_rx.clone())).await.is_err());
         let in_flight = waiting.clone();
         let pending_store = store.clone();
         let pending_cancel = cancel_rx.clone();
