@@ -3,6 +3,7 @@ use crate::{agents::{registered, AgentRole, ConnectionKind}, store::{err, timest
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 
 const PROVIDERS: [(&str, &str, &str); 3] = [
     ("claude_code", "Claude Code", "claude.exe"),
@@ -207,6 +208,28 @@ impl Store {
     }
 }
 
+/// Command entry points for agent registration write to SQLite, and `shutdown`
+/// checkpoints WAL after it closes admission. The guard therefore lives beside
+/// the store call instead of only in the Tauri wrapper, so the rejection order
+/// (guard first, no write) is testable without a running app.
+pub(crate) fn register_instance(
+    store: &Store,
+    accepting: &AtomicBool,
+    provider_id: &str,
+    path: &str,
+    role: &str,
+) -> Result<Instance> {
+    crate::engine::ensure_accepting(accepting)?;
+    store.register_agent_instance(provider_id, path, role)
+}
+
+/// Registration removal is the other half of the same gap: it deletes rows that
+/// the shutdown checkpoint is finalizing, so it needs the same admission guard.
+pub(crate) fn unregister_instance(store: &Store, accepting: &AtomicBool, id: &str) -> Result<()> {
+    crate::engine::ensure_accepting(accepting)?;
+    store.unregister_agent_instance(id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -286,6 +309,29 @@ mod tests {
         reopened.unregister_agent_instance(&item.id).unwrap();
         assert!(exe.exists());
         assert_eq!(reopened.list_agent_instances().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn registration_writes_are_refused_while_closing() {
+        // `shutdown` closes admission before it stops the worker and checkpoints
+        // WAL, so a late registration must fail without touching SQLite.
+        use std::sync::atomic::Ordering;
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(&temp.path().join("chat.sqlite")).unwrap();
+        let exe = temp.path().join("claude.exe");
+        std::fs::write(&exe, b"do not execute").unwrap();
+        let accepting = AtomicBool::new(true);
+        let item = register_instance(&store, &accepting, "claude_code", &exe.to_string_lossy(), "lead").unwrap();
+        let before = store.list_agent_instances().unwrap().len();
+        accepting.store(false, Ordering::SeqCst);
+        let register_error = register_instance(&store, &accepting, "claude_code", &exe.to_string_lossy(), "reviewer").unwrap_err();
+        assert!(register_error.contains("종료 중"), "{register_error}");
+        assert_eq!(store.list_agent_instances().unwrap().len(), before);
+        let unregister_error = unregister_instance(&store, &accepting, &item.id).unwrap_err();
+        assert!(unregister_error.contains("종료 중"), "{unregister_error}");
+        assert!(store.list_agent_instances().unwrap().iter().any(|entry| entry.id == item.id));
+        // The guard is not a one-off: nothing reopens admission during shutdown.
+        assert!(register_instance(&store, &accepting, "claude_code", &exe.to_string_lossy(), "lead").is_err());
     }
 
     #[test]

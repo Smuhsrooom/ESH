@@ -48,12 +48,12 @@ fn list_agent_instances(engine: tauri::State<'_, Arc<Engine>>) -> Result<Vec<reg
 
 #[tauri::command]
 fn register_agent_instance(provider: String, path: String, role: String, engine: tauri::State<'_, Arc<Engine>>) -> Result<registry::Instance> {
-    engine.store.register_agent_instance(&provider, &path, &role)
+    registry::register_instance(&engine.store, engine.admission(), &provider, &path, &role)
 }
 
 #[tauri::command]
 fn unregister_agent_instance(id: String, engine: tauri::State<'_, Arc<Engine>>) -> Result<()> {
-    engine.store.unregister_agent_instance(&id)
+    registry::unregister_instance(&engine.store, engine.admission(), &id)
 }
 
 #[tauri::command]
@@ -75,6 +75,7 @@ async fn list_codex_models(engine: tauri::State<'_, Arc<Engine>>) -> Result<Vec<
 
 #[tauri::command]
 async fn list_opencode_models(session_id: String, engine: tauri::State<'_, Arc<Engine>>) -> Result<Vec<opencode::OpenCodeModel>> {
+    engine.ensure_accepting()?;
     engine.list_opencode_models(&session_id).await
 }
 

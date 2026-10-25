@@ -135,6 +135,11 @@ impl Engine {
     pub fn ensure_accepting(&self) -> Result<()> {
         ensure_accepting(&self.accepting)
     }
+    /// Lets command wrappers hand the admission flag to helpers that only need
+    /// the flag and the store, so the guard order stays testable.
+    pub fn admission(&self) -> &AtomicBool {
+        &self.accepting
+    }
     pub fn cancel(&self, session_id: &str, run_id: &str) -> Result<Snapshot> {
         let mut active = self.active.lock().map_err(err)?;
         let run = active.as_mut().ok_or("이미 실행이 끝났습니다")?;
