@@ -1,5 +1,19 @@
 # ESH 진행 상태와 개발 인계
 
+## 에이전트 상태의 무음 성공 제거 (2026-10-25)
+
+- 선택한 작업: 로드맵 1단계(기존 기능 안정화) 잔여 항목 중 앞선 회차가 남긴 "`Store::status`의 무음 성공". `status`는 `UPDATE agents ... WHERE id=?`의 갱신 행 수를 보지 않고 `meta.revision`을 올린 뒤 `Ok(())`를 돌려줬어. 세션의 `agent_instance_id`(등록 인스턴스 ID, 예: OpenCode 등록 UUID)로 호출되면 `agents` 표에 해당 행이 없어 아무것도 저장되지 않았는데도 호출부는 저장된 것으로 처리했어. `cancel`·`error`·`state`가 모두 이 경로를 쓰고, `AgentsView.tsx`는 이미 `snapshot.agents`에서 인스턴스 ID로 상태를 찾고 있어 화면에는 값이 없어 `idle`로 대체되고 있었어.
+- 변경 파일: `mvp-app/src-tauri/src/store.rs`(`status`가 `Result<bool>` 반환, 빈 ID 거부, `agents`·`agent_instances`에 있는 ID만 허용, 등록 인스턴스는 `INSERT OR IGNORE`로 `idle` 기준 행을 만든 뒤 갱신, 갱신 행 0개면 `false`·revision 미변경, 회귀 테스트 1개), `mvp-app/src-tauri/src/engine.rs`(`state`·`cancel`이 `false`를 받으면 `agent_status_unmatched` audit 기록, 중단·턴 진행은 그대로 유지).
+- 동작 보존: `agents` 스키마·기존 두 행, `tool_deliveries`, Blocking Delegation, `request_arch_review`, archReview/latestUserRequirements 분리, 종료 순서, Arch 타임아웃 120초(범위 30~600), 기존 세션·메시지·컨텍스트는 변경하지 않았어. 새 DB 마이그레이션은 없고 `agents`에 등록 인스턴스 행이 추가로 생길 수만 있어(기존 행·데이터 삭제 없음). `cli.rs`의 `store.status("antigravity", ...)?`와 정리 경로의 `let _ =` 호출은 반환형 변경만으로 컴파일되며 동작이 같아.
+- 검증 (실제 출력):
+  - `npm test` → `test result: ok. 53 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.68s` (기존 52 + 신규 1, `store::tests::status_reports_whether_it_was_stored ... ok`)
+  - `node scripts/verify_external_threads.mjs` → `{"passed":true,"recordedRows":27,"scratchRowsHidden":9,"normalConversationsPreserved":true}`
+  - `npm run build` → `✓ built in 2.75s` (`dist/assets/index-B_6vxOOa.js` 433.29 kB)
+- 회귀 검사 내용: builtin `codex` 상태는 `true`로 저장되고 snapshot에 반영. `agent_instances`에만 있는 `inst-open-1`은 행이 생성되고 상태가 저장됨. 없는 `ghost-agent`와 공백 ID는 `false`를 반환하고 행을 만들지 않으며 `revision`도 그대로. 이 테스트는 저장소 계층만 검사해요.
+- 이번 결과는 Rust 단위·분류 회귀 검사야. 실제 Tauri WebView에서 OpenCode 세션의 실행 상태가 Agents 화면에 표시되는지, 실제 CLI 턴에서 `agent_status_unmatched`가 남는지는 확인하지 않았어. `python scripts/verify_*.py`와 데스크톱 빌드는 실행하지 않았어.
+- 남은 문제: 원본 세션 동시 사용을 막는 전역 잠금은 여전히 없어. 등록 인스턴스 행이 한 번 생기면 등록 해제 후에도 `agents`에 남아(상태 `unknown`으로 복구될 뿐) 정리 경로가 없어. 이번 변경으로 화면에 인스턴스별 실행 상태가 나타날 수 있지만 WebView 검증은 없어.
+- 다음 작업: "종료 중 생성·가져오기·등록 거절"을 실제 WebView에서 재현하는 검증 경로 마련, 또는 등록 해제 시 `agents` 행 정리 여부 결정.
+
 ## 도구 응답 확인의 무음 성공 제거 (2026-10-25)
 
 - 선택한 작업: 로드맵 1단계(기존 기능 안정화) 잔여 항목 중 앞선 회차가 남긴 "`Store::tool_state` 무음 성공, 특히 `confirm_tool`의 `turn_id=None` → `null` 키". `confirm_tool`은 `self.turn_id`가 없을 때 `null`을 포함한 키로 갱신을 시도했고, `tool_state`는 갱신 행이 0개여도 `Ok(())`를 돌려줘 실제로 저장되지 않은 상태를 `confirmed`로, `review_confirmed` audit까지 남길 수 있었어.
