@@ -2,9 +2,12 @@
 //!
 //! This module defines the invocation contract, the stream-json result
 //! classification and the one-process-per-turn runner for a future
-//! `claude_code_cli` Lead adapter. Nothing here is registered or wired yet: the
-//! adapter, the session path and the Engine turn branch are a later change, so
-//! the items stay unused until then.
+//! `claude_code_cli` Lead adapter. `Engine::claude_turn` calls `run` for a
+//! session whose provider is `claude_code`, but nothing can reach that branch
+//! yet: no command creates such a session, and `submit` refuses the
+//! `claude_code` target because no adapter advertises it. The adapter
+//! registration and the session path are a later change, so `CONNECTION_KIND`
+//! stays unused until then.
 //!
 //! Evidence boundary:
 //! - The flags and values in `command_args` are checked against the help text

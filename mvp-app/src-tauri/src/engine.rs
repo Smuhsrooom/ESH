@@ -54,6 +54,7 @@ pub(crate) fn ensure_accepting(accepting: &AtomicBool) -> Result<()> {
 enum TurnRoute {
     Codex,
     OpenCode,
+    Claude,
     Arch,
 }
 
@@ -61,10 +62,10 @@ enum TurnRoute {
 /// it is bound to; a Codex session additionally owns the Arch question channel,
 /// which is a delegated review rather than a second lead.
 ///
-/// This is an allowlist on purpose. `worker` sends anything that is not
-/// `antigravity` or `opencode` to the Codex turn branch, so a provider without a
-/// branch of its own (a registered Claude Code instance, for example) would be
-/// answered by Codex and stored as if the session's own agent had replied.
+/// This is an allowlist on purpose. `worker` dispatches on the route it returns
+/// instead of on the target string, so a provider without a branch of its own
+/// can never be answered by the Codex branch and stored as if the session's own
+/// agent had replied.
 fn turn_route(session: &Session, target: &str) -> Option<TurnRoute> {
     match session.provider.as_str() {
         "codex" => match target {
@@ -73,6 +74,11 @@ fn turn_route(session: &Session, target: &str) -> Option<TurnRoute> {
             _ => None,
         },
         "opencode" => (target == "opencode").then_some(TurnRoute::OpenCode),
+        // Claude Code answers its own sessions only. The branch exists here so
+        // that adding the provider cannot fall through to Codex, but nothing can
+        // reach it yet: no command creates a `claude_code` session, and `submit`
+        // still refuses the `claude_code` target because no adapter advertises it.
+        "claude_code" => (target == "claude_code").then_some(TurnRoute::Claude),
         _ => None,
     }
 }
@@ -110,35 +116,67 @@ fn review_envelope(
 fn interrupt_consumed_input(store: &Store, id: &str) -> Result<bool> {
     store.interrupt_queued(id)
 }
-/// Commits a finished OpenCode turn. The local turn binding is confirmed first:
-/// when the user cancels while the CLI is answering, the message is no longer
-/// `queued`, and the turn must not move `chat_sessions.thread_id` to an external
-/// session whose answer was never stored locally. Otherwise the next turn would
-/// resume a conversation that local history cannot show. The successful path
-/// writes the same rows as before.
-fn commit_opencode_answer(
+/// Commits a finished turn of a one-process-per-turn CLI lead (OpenCode, Claude
+/// Code). The local turn binding is confirmed first: when the user cancels while
+/// the CLI is answering, the message is no longer `queued`, and the turn must not
+/// move `chat_sessions.thread_id` to an external session whose answer was never
+/// stored locally. Otherwise the next turn would resume a conversation that local
+/// history cannot show. The successful path writes the same rows as before.
+///
+/// `speaker` is the stored author of the answer, so the two CLIs share the
+/// ordering rule without sharing an answer type.
+fn commit_lead_answer(
     store: &Store,
+    speaker: &str,
     session_id: &str,
     user_id: &str,
-    answer: &crate::opencode::Answer,
+    external: &str,
+    text: &str,
 ) -> Result<()> {
     let turn = uuid::Uuid::new_v4().to_string();
-    store.confirm_turn_start(user_id, &answer.session_id, &turn)?;
-    store.bind_codex_session(session_id, &answer.session_id, &answer.session_id)?;
+    store.confirm_turn_start(user_id, external, &turn)?;
+    store.bind_codex_session(session_id, external, external)?;
     store.routed_message(
-        "opencode",
-        &answer.text,
+        speaker,
+        text,
         false,
         Route {
             channel: "main",
             kind: "answer",
-            thread_id: Some(answer.session_id.clone()),
+            thread_id: Some(external.to_string()),
             turn_id: Some(turn),
             chat_session_id: Some(session_id.to_string()),
             ..Route::default()
         },
     )?;
     Ok(())
+}
+
+/// Resolves the registered Claude Code CLI that owns this session.
+///
+/// The check reads the stored `role` rather than `active_role`: no adapter
+/// advertises Claude yet, so `active_role` is still `None` for a Claude
+/// registration. Registering the adapter is the slice that promotes it to
+/// `supported`, and that slice has to land together with the session path so the
+/// claim matches a runnable turn.
+fn claude_runner(store: &Store, session: &Session) -> Result<(String, PathBuf)> {
+    if session.provider != "claude_code" {
+        return Err("Claude Code 세션이 아닙니다".into());
+    }
+    let id = session
+        .agent_instance_id
+        .as_deref()
+        .ok_or("Claude Code 등록 ID가 없습니다")?;
+    let instance = store
+        .list_agent_instances()?
+        .into_iter()
+        .find(|i| i.id == id)
+        .ok_or("Claude Code 등록을 찾을 수 없습니다")?;
+    if instance.role != "lead" || instance.installation != "installed" {
+        return Err("등록된 Claude Code CLI가 실행 가능하지 않습니다".into());
+    }
+    let path = instance.path.ok_or("Claude Code 실행 파일 경로가 없습니다")?;
+    Ok((id.to_string(), PathBuf::from(path)))
 }
 use tauri::{AppHandle, Emitter};
 use tokio::sync::{mpsc, watch};
@@ -513,8 +551,11 @@ impl Engine {
                 let _ = self.emit();
                 continue;
             }
-            let agent_key = self.store.session(&input.message.chat_session_id).ok()
-                .and_then(|s| s.agent_instance_id).unwrap_or("codex".into());
+            let saved = self.store.session(&input.message.chat_session_id).ok();
+            let agent_key = saved.as_ref().and_then(|s| s.agent_instance_id.clone()).unwrap_or("codex".into());
+            // Dispatch on the allowlisted route, never on the target string, so a
+            // provider with no branch of its own cannot reach the Codex branch.
+            let route = saved.as_ref().and_then(|s| turn_route(s, &input.target));
             let (run_stop, run_stopped) = watch::channel(false);
             let run_id = uuid::Uuid::new_v4().to_string();
             *self.active.lock().unwrap() = Some(ActiveRun {
@@ -540,7 +581,7 @@ impl Engine {
                 Err(e)
             } else if *run_stopped.borrow() {
                 Err("실행 중단".into())
-            } else if input.target == "antigravity" {
+            } else if route == Some(TurnRoute::Arch) {
                 let _ = self.state("antigravity", "arch_running", "질문에 답하는 중");
                 let _ = self
                     .store
@@ -562,12 +603,18 @@ impl Engine {
                     }
                     Err(e) => Err(e),
                 }
-            } else if input.target == "opencode" {
+            } else if route == Some(TurnRoute::OpenCode) {
                 self.opencode_turn(&input.message, run_stopped.clone()).await
-            } else {
+            } else if route == Some(TurnRoute::Claude) {
+                self.claude_turn(&input.message, run_stopped.clone()).await
+            } else if route == Some(TurnRoute::Codex) {
                 let result = self.codex_turn(&mut rpc, &input.message, &input.settings, run_stopped.clone()).await;
                 if rpc.is_some() { rpc_owner = Some(input.message.chat_session_id.clone()); }
                 result
+            } else {
+                // `submit` already refuses an unroutable pair, so this only guards
+                // an input queued before the session's provider changed.
+                Err("이 세션의 에이전트와 메시지 대상이 다릅니다".into())
             };
             if self.streams.lock().unwrap().interrupt(&self.store).unwrap_or(0) > 0 { let _ = self.emit(); }
             if *stop.borrow() { break; }
@@ -602,8 +649,19 @@ impl Engine {
                 // Keep it in SQLite as a recoverable, non-replayed input.
                 let _ = interrupt_consumed_input(&self.store, &input.message.id);
                 if e.contains("연결 정리 확인 불가 (unknown)") { connection_uncertain = true; }
-                let _ = self.error(if connection_uncertain { "codex" } else if input.target == "opencode" { &agent_key } else { &input.target }, &e);
-                if input.target == "codex" {
+                // A CLI lead's status row is keyed by its registration id, not by
+                // the provider name, so the failing agent has to follow the route.
+                let error_agent = if connection_uncertain {
+                    "codex".to_string()
+                } else {
+                    match route {
+                        Some(TurnRoute::Arch) => "antigravity".to_string(),
+                        Some(TurnRoute::OpenCode) | Some(TurnRoute::Claude) => agent_key.clone(),
+                        _ => input.target.clone(),
+                    }
+                };
+                let _ = self.error(&error_agent, &e);
+                if route == Some(TurnRoute::Codex) {
                     if let Some(mut old) = rpc.take() {
                         if let Err(close_error) = LeadSession::close(&mut old).await {
                             connection_uncertain = true;
@@ -1008,8 +1066,26 @@ impl Engine {
             std::path::Path::new(path), &self.data_dir, saved.thread_id.as_deref(), saved.model.as_deref(), &user.content, stop.clone(),
         ).await?;
         if *stop.borrow() { return Err("OpenCode 실행 중단".into()); }
-        commit_opencode_answer(&self.store, &saved.id, &user.id, &answer)?;
+        commit_lead_answer(&self.store, "opencode", &saved.id, &user.id, &answer.session_id, &answer.text)?;
         self.state(id, "completed", "답변 완료")?;
+        Ok(())
+    }
+
+    /// One Claude Code turn. The CLI runs as a fresh process per turn and resumes
+    /// the saved conversation id, so an answer never depends on a process that
+    /// outlived the previous turn. The turn is not reachable yet: no command
+    /// creates a `claude_code` session and `submit` still refuses that target
+    /// because no adapter advertises it.
+    async fn claude_turn(&self, user: &Message, stop: watch::Receiver<bool>) -> Result<()> {
+        let saved = self.store.session(&user.chat_session_id)?;
+        let (instance_id, path) = claude_runner(&self.store, &saved)?;
+        self.state(&instance_id, "running", "Claude Code 답변을 준비하는 중")?;
+        let answer = crate::claude::run(
+            &path, &self.data_dir, saved.thread_id.as_deref(), saved.model.as_deref(), &user.content, stop.clone(),
+        ).await?;
+        if *stop.borrow() { return Err("Claude Code 실행 중단".into()); }
+        commit_lead_answer(&self.store, "claude_code", &saved.id, &user.id, &answer.session_id, &answer.text)?;
+        self.state(&instance_id, "completed", "답변 완료")?;
         Ok(())
     }
 }
@@ -1178,50 +1254,147 @@ mod switch_tests {
 }
 
 #[cfg(test)]
-mod opencode_commit_tests {
-    use super::commit_opencode_answer;
-    use crate::{opencode::Answer, store::Store};
+mod cli_commit_tests {
+    use super::commit_lead_answer;
+    use crate::store::Store;
 
     fn store() -> (tempfile::TempDir, Store) {
         let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(&dir.path().join("opencode.sqlite")).unwrap();
+        let store = Store::open(&dir.path().join("cli.sqlite")).unwrap();
         (dir, store)
     }
 
-    fn answer() -> Answer {
-        Answer { session_id: "ses_external".into(), text: "OpenCode 답변".into() }
+    fn commit(store: &Store, speaker: &str, user: &str) -> crate::store::Result<()> {
+        commit_lead_answer(store, speaker, "default-session", user, "external-session", "CLI 답변")
     }
 
     #[test]
-    fn a_finished_turn_binds_the_external_session_and_stores_the_answer() {
+    fn a_finished_opencode_turn_binds_the_external_session_and_stores_the_answer() {
         let (_dir, store) = store();
         let user = store.message("user", "질문", false).unwrap();
-        commit_opencode_answer(&store, "default-session", &user.id, &answer()).unwrap();
+        commit(&store, "opencode", &user.id).unwrap();
         let session = store.session("default-session").unwrap();
-        assert_eq!(session.thread_id.as_deref(), Some("ses_external"));
-        assert_eq!(session.session_id, "ses_external");
+        assert_eq!(session.thread_id.as_deref(), Some("external-session"));
+        assert_eq!(session.session_id, "external-session");
         let messages = store.snapshot().unwrap().messages;
         assert_eq!(messages.len(), 2);
         assert_eq!((messages[0].delivery.as_str(), messages[0].turn_id.is_some()), ("delivered", true));
         assert_eq!((messages[1].speaker.as_str(), messages[1].channel.as_str()), ("opencode", "main"));
         assert_eq!(
             (messages[1].content.as_str(), messages[1].delivery.as_str()),
-            ("OpenCode 답변", "delivered")
+            ("CLI 답변", "delivered")
         );
     }
 
     #[test]
-    fn a_cancelled_turn_neither_moves_the_external_session_nor_stores_an_answer() {
+    fn a_finished_claude_turn_uses_the_same_rows_under_its_own_speaker() {
+        // The two CLI leads share the commit ordering but must not share an author
+        // name: an OpenCode answer stored as `claude_code` (or the reverse) would
+        // attribute the text to an agent that never ran.
         let (_dir, store) = store();
         let user = store.message("user", "질문", false).unwrap();
-        store.cancel_queued("default-session").unwrap();
-        assert!(commit_opencode_answer(&store, "default-session", &user.id, &answer()).is_err());
+        commit(&store, "claude_code", &user.id).unwrap();
         let session = store.session("default-session").unwrap();
-        assert_eq!(session.thread_id, None);
-        assert_eq!(session.session_id, "");
+        assert_eq!(session.thread_id.as_deref(), Some("external-session"));
         let messages = store.snapshot().unwrap().messages;
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].delivery, "cancelled");
+        assert_eq!(messages.len(), 2);
+        assert_eq!((messages[0].delivery.as_str(), messages[0].turn_id.is_some()), ("delivered", true));
+        assert_eq!((messages[1].speaker.as_str(), messages[1].channel.as_str()), ("claude_code", "main"));
+        assert_eq!(messages[1].thread_id.as_deref(), Some("external-session"));
+    }
+
+    #[test]
+    fn a_cancelled_turn_neither_moves_the_external_session_nor_stores_an_answer() {
+        for speaker in ["opencode", "claude_code"] {
+            let (_dir, store) = store();
+            let user = store.message("user", "질문", false).unwrap();
+            store.cancel_queued("default-session").unwrap();
+            assert!(commit(&store, speaker, &user.id).is_err(), "{speaker}");
+            let session = store.session("default-session").unwrap();
+            assert_eq!(session.thread_id, None, "{speaker}");
+            assert_eq!(session.session_id, "", "{speaker}");
+            let messages = store.snapshot().unwrap().messages;
+            assert_eq!(messages.len(), 1, "{speaker}");
+            assert_eq!(messages[0].delivery, "cancelled", "{speaker}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod claude_runner_tests {
+    use super::claude_runner;
+    use crate::store::Store;
+    use rusqlite::params;
+
+    fn new_store() -> (tempfile::TempDir, Store) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("claude.sqlite")).unwrap();
+        (dir, store)
+    }
+
+    fn register(dir: &std::path::Path, store: &Store, role: &str) -> String {
+        let exe = dir.join("claude.exe");
+        std::fs::write(&exe, b"probe only").unwrap();
+        store
+            .register_agent_instance("claude_code", &exe.to_string_lossy(), role)
+            .unwrap()
+            .id
+    }
+
+    fn point(store: &Store, provider: &str, instance: Option<&str>) {
+        store
+            .db
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE chat_sessions SET provider=?1,agent_instance_id=?2 WHERE id='default-session'",
+                params![provider, instance],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn only_a_claude_session_with_a_runnable_lead_registration_resolves() {
+        let (dir, store) = new_store();
+        let instance = register(dir.path(), &store, "lead");
+        let exe = std::fs::canonicalize(dir.path().join("claude.exe")).unwrap();
+
+        // A Codex session must never be answered by the Claude branch.
+        let codex = store.session("default-session").unwrap();
+        assert!(claude_runner(&store, &codex).unwrap_err().contains("Claude Code 세션이 아닙니다"));
+
+        point(&store, "claude_code", None);
+        let saved = store.session("default-session").unwrap();
+        assert!(claude_runner(&store, &saved).unwrap_err().contains("등록 ID가 없습니다"));
+
+        point(&store, "claude_code", Some("unregistered"));
+        let saved = store.session("default-session").unwrap();
+        assert!(claude_runner(&store, &saved).unwrap_err().contains("등록을 찾을 수 없습니다"));
+
+        point(&store, "claude_code", Some(&instance));
+        let saved = store.session("default-session").unwrap();
+        let (id, path) = claude_runner(&store, &saved).unwrap();
+        assert_eq!(id, instance);
+        assert_eq!(path, exe);
+    }
+
+    #[test]
+    fn a_registration_without_a_lead_role_or_a_present_file_does_not_run() {
+        let (dir, store) = new_store();
+        let reviewer = register(dir.path(), &store, "reviewer");
+        point(&store, "claude_code", Some(&reviewer));
+        let saved = store.session("default-session").unwrap();
+        assert!(claude_runner(&store, &saved).unwrap_err().contains("실행 가능하지 않습니다"));
+
+        // A registration that was removed from disk after it was stored cannot
+        // run either: the file check is repeated at turn time, not only at
+        // registration time.
+        let (dir2, store2) = new_store();
+        let lead = register(dir2.path(), &store2, "lead");
+        point(&store2, "claude_code", Some(&lead));
+        std::fs::remove_file(dir2.path().join("claude.exe")).unwrap();
+        let saved = store2.session("default-session").unwrap();
+        assert!(claude_runner(&store2, &saved).unwrap_err().contains("실행 가능하지 않습니다"));
     }
 }
 
@@ -1270,12 +1443,10 @@ mod session_route_tests {
 
     #[test]
     fn a_provider_without_a_branch_never_falls_through_to_codex() {
-        // The worker's last branch is the Codex turn, so a session whose provider
-        // has no branch yet must be refused for every target instead of being
-        // answered by Codex. This is the guard a Claude Code session needs before
-        // its own turn branch exists.
+        // The worker dispatches on this allowlist, so a provider it does not know
+        // must be refused for every target instead of being answered by Codex.
         let (_dir, store) = store();
-        for provider in ["claude_code", "gemini_cli", "mock_agent", "unknown"] {
+        for provider in ["gemini_cli", "mock_agent", "unknown"] {
             store
                 .db
                 .lock()
@@ -1284,9 +1455,27 @@ mod session_route_tests {
                 .unwrap();
             let saved = store.session("default-session").unwrap();
             assert_eq!(saved.provider, provider);
-            for target in ["codex", "antigravity", "opencode", provider] {
+            for target in ["codex", "antigravity", "opencode", "claude_code", provider] {
                 assert_eq!(turn_route(&saved, target), None, "{provider} -> {target}");
             }
+        }
+    }
+
+    #[test]
+    fn a_claude_session_owns_only_its_own_cli() {
+        // The Claude branch exists so the provider cannot fall through to Codex,
+        // but it answers nothing else: no Arch channel, no Codex turn.
+        let (_dir, store) = store();
+        store
+            .db
+            .lock()
+            .unwrap()
+            .execute("UPDATE chat_sessions SET provider='claude_code' WHERE id='default-session'", [])
+            .unwrap();
+        let saved = store.session("default-session").unwrap();
+        assert_eq!(turn_route(&saved, "claude_code"), Some(TurnRoute::Claude));
+        for target in ["codex", "antigravity", "opencode", "gemini_cli", ""] {
+            assert_eq!(turn_route(&saved, target), None, "{target}");
         }
     }
 
