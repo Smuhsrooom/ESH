@@ -1,5 +1,21 @@
 # ESH 진행 상태와 개발 인계
 
+## 중복 실행 시 검은 창·렌더링 실패 대응 (2026-10-25)
+
+- 선택한 작업: 사용자가 보고한 "여러 번 실행하면 창이 검게 나오거나 렌더링이 안 되고, 강제 종료를 반복하면 `%LOCALAPPDATA%\local.esh.conversation\EBWebView` 프로필이 오염된다" 문제. 코드로 확인한 결과 **단일 인스턴스 장치가 전혀 없었어**(`grep -rn "single_instance\|CreateMutex"` 결과 0건). 두 번째 프로세스가 같은 앱 식별자로 WebView2 user data 폴더를 동시에 잡고, 강제 종료로 남은 `msedgewebview2` 자식이 폴더를 쥔 채 새 인스턴스가 뜨는 경로가 그대로 열려 있었어.
+- 원인 판정: (1) 중복 실행 = **맞음**. 두 프로세스가 동일 프로필을 동시에 연다. (2) `tauri.conf.json`의 `visible:false` = **재현 안 됨**. 현재 설정은 `{"label":"main","title":"ESH · AI 협업","width":1600,"height":900,"minWidth":900,"minHeight":600,"center":true,"zoomHotkeysEnabled":true}`로 `visible` 키 자체가 없어. 다만 설정 실수로 창이 숨는 경로를 코드로 막으라는 요구에 따라 `setup`에서 `show()`를 명시 호출. (3) 이전 프로세스의 WebView2 자식이 폴더를 잠금 = (1)의 결과이자 강제 종료의 잔재. 단일 인스턴스로 새 인스턴스가 프로필을 열기 전에 종료시키는 방식으로 함께 막았어.
+- 변경 파일: `mvp-app/src-tauri/Cargo.toml`(`tauri-plugin-single-instance = "2"` 추가, 해석된 버전 2.5.4), `mvp-app/src-tauri/src/main.rs`(빌더의 **첫 플러그인**으로 단일 인스턴스 등록 — 두 번째 실행은 콜백에서 `unminimize`/`show`/`set_focus`만 수행하고 종료, `setup`에서 `window_state::restore` 뒤 `window.show()` 명시 호출), `mvp-app/src-tauri/Cargo.lock`.
+- 동작 근거(코드 확인, 실행 검증 아님): Tauri 2.12.4 `app.rs`에서 `initialize_plugins()`가 `build()`의 마지막 단계(2607행)이고 설정 창 생성·사용자 `setup`은 `run()`의 `setup(self)`(1529행)에서 일어나. 즉 두 번째 인스턴스는 **창 생성과 `Engine::start`(SQLite `Store::open`) 이전에** 종료되므로 기존 창·세션·DB를 건드리지 않아. 플러그인 문서도 "The second instance never reaches `tauri::Builder::run`"이라고 명시해. 단일 인스턴스 잠금은 앱 식별자 `local.esh.conversation` 기반 named mutex이고, `RunEvent::Exit`에서 해제돼. 우리 코드에는 `std::process::exit` 호출이 없고 종료는 전부 `app.exit(0)`(main.rs 233·312행)이라 뮤텍스가 남지 않아.
+- 종료 정리 확인: 기존 경로는 `CloseRequested` → `prevent_close` → `closing` 중복 방지 → `engine.shutdown()`(접수 차단 → worker 중지 → 최대 25초 대기) → 실패 시 `codex` 상태 `unknown` + `checkpoint` → `app.exit(0)`. 종료 확인 실패를 성공으로 바꾸는 코드는 없어. Codex·OpenCode·Arch 자식 프로세스는 모두 `kill_on_drop(true)`(cli.rs 128·545·630, opencode.rs 38·86)로 스폰돼 프로세스 종료 시 함께 정리되고, WebView2 자식은 `app.exit(0)`에서 Tauri가 웹뷰를 드롭하며 끝나. **이 정리 동작 자체를 실제 실행으로 관측하지는 않았어**(아래 검증 한계).
+- 검증 (실제 출력):
+  - `npm test` → `test result: ok. 56 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.68s`
+  - `node scripts/verify_external_threads.mjs` → `{"passed":true,"recordedRows":27,"scratchRowsHidden":9,"normalConversationsPreserved":true}`
+  - `npm run build:desktop` → 프런트 `✓ built`(`dist/assets/index-B_6vxOOa.js` 433.29 kB, `guiProbe-djswdxyz.js` 45.64 kB) + Rust `Finished \`dev\` profile ... in 18.65s`, 산출물 `mvp-app/src-tauri/target/debug/esh-chat-mvp4.exe` (16,614,400 bytes, 2026-10-25 15:56). 실행 파일 이름은 `esh-chat-mvp4` 하나만 갱신했고 새 이름의 exe는 만들지 않았어. 빌드 경고 2건(`agents.rs`의 `Availability::Ready`·`Authentication` 미사용 variant)은 이번 변경과 무관한 기존 경고야.
+- 검증 한계(중요): 사용자 지시에 따라 GUI를 자동화 환경에서 띄우지 않았어. 따라서 "두 번째 실행이 새 창을 만들지 않고 기존 창을 앞으로 가져오는지"와 "종료 후 WebView2 자식이 남지 않는지"는 **실행으로 확인하지 못했어**. 참고로 이번 회차 초반에 GUI 프로브를 띄웠을 때 창은 `ESH · AI 협업` 제목으로 생성됐지만 devtools로 확인한 `document.getElementById('root').childElementCount`가 `0`, `document.body.innerText`가 빈 문자열이었고 `gui-probe.json`도 만들어지지 않았어(당시 실행 기록: `mvp-app/evidence/shutdown-20261025-153310/`). 이 증상은 앱 코드 결함이 아니라 자동화 환경의 WebView2 초기화 실패로 판단해.
+- 이번 회차에 함께 시도했다가 되돌린 것: "종료 중 명령 거절"을 실제 WebView에서 재현하는 GUI 프로브(`ESH_GUI_PROBE=shutdown` + `begin_shutdown_probe` 명령 + `scripts/verify_shutdown.py`). 위 WebView2 초기화 문제로 증거를 만들 수 없어 커밋하지 않고 전부 되돌렸어. 그 검증 공백은 그대로 남아 있어.
+- 남은 문제: (a) 위 두 가지 실행 확인은 사용자 환경에서 필요해. (b) `tauri-plugin-single-instance` 2.5.4의 Windows 구현은 뮤텍스를 잡은 뒤 첫 인스턴스의 메시지 창을 `FindWindowW`로 찾지 못하면(동시 실행 경합) 두 번째도 그대로 진행해. 이 경합은 플러그인 내부 한계로, 이번 변경에서 별도 IPC를 덧붙이지 않았어. (c) 원본 세션 전역 잠금 설계는 여전히 **승인 대기**.
+- 다음 작업: 사용자가 실제 환경에서 2회 연속 실행·정상 종료 후 `msedgewebview2` 잔존 여부를 확인. 문제가 남으면 (b) 경합 보강을 별도 항목으로 설계.
+
 ## 에이전트 배지 개수와 목록 불일치 정리 (2026-10-25)
 
 - 선택한 작업: 로드맵 1단계(기존 기능 안정화) 잔여 항목 중 앞선 회차가 남긴 "에이전트 등록·해제와 `agents` 행의 불일치"의 남은 절반. `main.tsx`는 `에이전트` 배지 개수를 `snapshot.agents.length`로 표시하고, `AgentsView`는 builtin 두 개와 `agent_instances`의 모든 사용자 등록을 목록에 그려. 그런데 `register_agent_instance`는 OpenCode Lead(`opencode_cli_json`)일 때만 `agents` 행을 만들었어. 그래서 Claude Code·Gemini CLI처럼 실행 연결이 없는 등록을 추가하면 목록은 3개인데 배지는 2로 남았어. 지난 회차가 "인스턴스가 없는 `agents` 행"을 지워 배지가 부풀던 문제를 고쳤으니, 이번에는 반대 방향(등록이 있는데 상태 행이 없는 경우)을 맞췄어.
