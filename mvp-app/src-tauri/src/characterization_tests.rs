@@ -102,6 +102,25 @@ fn late_user_requirement_is_queued_only_in_its_session() {
 }
 
 #[test]
+fn closing_admission_refuses_every_new_work_command() {
+    // Regression for the shutdown gap: only `submit` used to check admission,
+    // so room/session creation and external list/import could still start a
+    // worker job, a SQLite write, or a short-lived Codex process while the
+    // worker was finalizing state and checkpointing WAL.
+    use crate::engine::ensure_accepting;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let accepting = AtomicBool::new(true);
+    assert!(ensure_accepting(&accepting).is_ok());
+    // `shutdown` closes admission first, before it signals the worker.
+    accepting.store(false, Ordering::SeqCst);
+    let first = ensure_accepting(&accepting).unwrap_err();
+    assert!(first.contains("종료 중"), "{first}");
+    // Nothing in the guard reopens admission, so every later command fails too.
+    assert!(ensure_accepting(&accepting).is_err());
+    assert!(!accepting.load(Ordering::SeqCst));
+}
+
+#[test]
 fn confirmed_turn_is_atomic_and_cannot_run_the_same_message_twice() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(&dir.path().join("turn.sqlite")).unwrap();

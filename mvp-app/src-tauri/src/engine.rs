@@ -36,6 +36,17 @@ where
     }
     Ok(())
 }
+/// Admission control for work that outlives the current call: worker jobs,
+/// SQLite writes that shutdown later checkpoints, and short-lived CLI processes.
+/// `shutdown` closes this before it stops the worker, so every command that
+/// starts new work has to ask first instead of relying on `submit` alone.
+pub(crate) fn ensure_accepting(accepting: &AtomicBool) -> Result<()> {
+    if accepting.load(Ordering::SeqCst) {
+        Ok(())
+    } else {
+        Err("앱을 종료 중이어서 새 작업을 받을 수 없습니다".into())
+    }
+}
 fn interrupt_consumed_input(store: &Store, id: &str) -> Result<bool> {
     store.interrupt_queued(id)
 }
@@ -118,6 +129,11 @@ impl Engine {
         let mut snapshot = self.store.snapshot()?;
         snapshot.active_run = self.active.lock().map_err(err)?.as_ref().map(|r| r.snapshot.clone());
         Ok(snapshot)
+    }
+    /// Shared by every Tauri command that starts new work (worker turn,
+    /// compaction, session/room creation, external list/import, CLI process).
+    pub fn ensure_accepting(&self) -> Result<()> {
+        ensure_accepting(&self.accepting)
     }
     pub fn cancel(&self, session_id: &str, run_id: &str) -> Result<Snapshot> {
         let mut active = self.active.lock().map_err(err)?;

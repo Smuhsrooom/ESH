@@ -63,6 +63,7 @@ fn cancel_run(session_id: String, run_id: String, engine: tauri::State<'_, Arc<E
 
 #[tauri::command]
 async fn list_codex_models(engine: tauri::State<'_, Arc<Engine>>) -> Result<Vec<models::CodexModel>> {
+    engine.ensure_accepting()?;
     let mut rpc = CODEX.connect(engine.store.clone()).await?;
     let result = async { rpc.handshake().await?; rpc.list_models().await }.await;
     let closed = LeadSession::close(&mut rpc).await;
@@ -104,6 +105,7 @@ fn send_message(
 
 #[tauri::command]
 fn create_room(name: String, engine: tauri::State<'_, Arc<Engine>>) -> Result<workspace::Room> {
+    engine.ensure_accepting()?;
     let room = engine.store.create_room(&name)?;
     engine.emit()?;
     Ok(room)
@@ -115,6 +117,7 @@ fn create_session(
     agent_instance_id: Option<String>,
     engine: tauri::State<'_, Arc<Engine>>,
 ) -> Result<store::Session> {
+    engine.ensure_accepting()?;
     let session = if let Some(id) = agent_instance_id {
         engine.store.create_opencode_session(&room_id, &name, &id)?
     } else { engine.store.create_session(&room_id, &name)? };
@@ -127,6 +130,7 @@ async fn list_codex_sessions(
     search: Option<String>,
     engine: tauri::State<'_, Arc<Engine>>,
 ) -> Result<Value> {
+    engine.ensure_accepting()?;
     let mut rpc = CODEX.connect(engine.store.clone()).await?;
     let result = async {
         rpc.handshake().await?;
@@ -153,6 +157,7 @@ async fn import_codex_session(
     if mode != "copy" && mode != "resume" {
         return Err("가져오기 방식을 선택해 주세요".into());
     }
+    engine.ensure_accepting()?;
     let mut rpc = CODEX.connect(engine.store.clone()).await?;
     let result = async {
         rpc.handshake().await?;
