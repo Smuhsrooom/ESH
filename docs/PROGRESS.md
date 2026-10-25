@@ -1,5 +1,28 @@
 # ESH 진행 상태와 개발 인계
 
+## 세션 provider와 실행 분기의 일치를 허용 목록으로 판정 (2026-10-25, 3단계 세 번째 조각)
+
+- 선택한 작업: 3단계(추가 CLI 어댑터) 다음 조각의 **전제 조건**. 지난 회차가 "Engine `claude_turn` 배선 전까지는 `submit`이 그 세션을 Codex 턴으로 보내지 않도록 provider 검사부터 닫아 둘 것"이라고 남긴 항목이야. `submit`의 기존 검사는 두 조합만 막는 블랙리스트(`opencode` 세션→비opencode, `codex` 세션→opencode)여서 `provider='claude_code'`인 세션에 `target='codex'`가 그대로 통과했고, `worker`의 마지막 분기가 `codex_turn`이라 **Codex가 답한 뒤 세션 에이전트가 답한 것처럼 저장**되는 경로가 열려 있었어. Claude 인스턴스를 등록하면 그 경로가 실제로 열리므로 등록보다 먼저 닫았어.
+- 변경 파일: `mvp-app/src-tauri/src/engine.rs` 1개.
+  - `TurnRoute { Codex, OpenCode, Arch }` + `turn_route(session, target)` 추가 — 세션 provider 기준 **허용 목록**이야. `codex`는 `codex`(Codex 턴)와 `antigravity`(Arch 질의, 위임 검토이지 두 번째 Lead가 아님)만, `opencode`는 `opencode`만 통과하고 **그 밖의 provider는 모든 대상이 거절**돼. `worker`의 마지막 분기가 Codex 턴이라는 사실에 기대지 않고, 분기가 없는 provider를 호출 전에 막아.
+  - `compact_thread(session)` 추가 — 수동 압축은 Codex 스레드 작업이야. `provider != "codex"`면 `Codex 세션이 아니어서 컨텍스트를 압축할 수 없습니다`로 거절하고, 그다음에 기존과 같은 `thread_id` 검사를 해. OpenCode 세션은 `thread_id`에 **자기 CLI 세션 ID**가 들어 있어(12회차 `commit_opencode_answer` → `bind_codex_session`) 기존 코드처럼 `thread_id`만 보면 그 값을 Codex 압축에 넘기게 돼.
+  - `submit`은 `turn_route(&saved, &target).is_none()`이면 기존과 같은 메시지(`이 세션의 에이전트와 메시지 대상이 다릅니다`)로 거절하고, `request_compact`는 `session.thread_id.as_deref().ok_or(...)`를 `compact_thread(session)?`로 교체했어(스레드 없음 메시지 동일).
+- 동작 보존: 정상 조합 세 가지(`codex`→`codex`, `codex`→`antigravity`, `opencode`→`opencode`)는 이전과 똑같이 통과하고, 거절 문구도 그대로야. 달라진 것은 (1) `codex`/`opencode`가 아닌 provider 세션의 **모든** 대상이 거절되고, (2) 비Codex 세션의 압축 요청이 거절된다는 두 가지뿐이야. 그런 세션은 아직 만들 수 없어(`create_session`은 codex, `create_opencode_session`은 opencode) 살아 있는 동작 변화는 없어. Blocking Delegation, `request_arch_review`, `archReview`/`latestUserRequirements` 구조적 분리, `tool_deliveries`, 종료 순서, Arch 타임아웃 120초(범위 30~600), 단일 worker, DB 스키마·`user_version=6`, 실행 파일 이름 `esh-chat-mvp4` 모두 그대로야. 새 Tauri 명령·새 DB 쓰기·프런트 변경은 없어.
+- 검증 (실제 출력):
+  - `cargo test --bin esh-chat-mvp4` (프로젝트 상위 `.tools`의 cargo를 직접 실행) → `test result: ok. 79 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.86s` (기존 75 + 신규 4). 신규: `engine::session_route_tests::a_codex_session_owns_the_codex_turn_and_the_arch_question_channel`, `an_opencode_session_only_answers_its_own_cli`, `a_provider_without_a_branch_never_falls_through_to_codex`, `manual_compaction_is_a_codex_thread_operation_only` — 모두 `ok`.
+  - `node scripts/verify_external_threads.mjs` → `{"passed":true,"recordedRows":27,"scratchRowsHidden":9,"normalConversationsPreserved":true}`
+  - `npm run build` → `✓ built in 3.60s` (`dist/assets/index-B_6vxOOa.js` 433.29 kB, `index-YBSTmYxd.css` 52.24 kB, `guiProbe-djswdxyz.js` 45.64 kB — 프런트를 건드리지 않아 해시 동일)
+  - Rust 경고는 기존 2건(`agents.rs`의 `Authenticated`·`Required`·`Error`, `Ready` 미사용 variant)뿐이고 `engine.rs`에서 새 경고는 없어.
+- 신규 테스트가 실제로 확인한 것: (1) 실제 `chat_sessions` 행(codex)에서 `codex`→Codex 턴, `antigravity`→Arch, `opencode`·`claude_code`·`gemini_cli`·빈 문자열→거절, (2) 실제로 등록한 OpenCode 인스턴스로 만든 세션은 `opencode`만 통과하고 `codex`·`antigravity`·`claude_code`는 거절, (3) 세션 provider를 `claude_code`·`gemini_cli`·`mock_agent`·`unknown`으로 바꾼 각 경우에 **어떤 대상도 Codex 턴으로 떨어지지 않음**(등록 전에 필요한 가드), (4) 압축은 Codex 세션이면서 `bind_codex_session`으로 스레드가 있을 때만 스레드 ID를 돌려주고, OpenCode 세션에 `thread_id`를 넣어도 `Codex 세션이 아니어서`로 거절.
+- 이 검증의 경계(중요): `Engine`은 `AppHandle`을 들고 있어 `submit`·`request_compact` **자체**를 단위 테스트로 호출하지 못했어. 테스트는 두 함수가 읽는 `Session` 행과 판정 함수(`turn_route`·`compact_thread`)를 검사한 것이고, 배선(어느 지점에서 부르는지)은 컴파일과 코드 확인으로만 검증했어. 실제 WebView에서의 거절 표시, `python scripts/verify_*.py`, 데스크톱 빌드는 실행하지 않았어(변경이 Rust 백엔드이고 실행 중인 앱을 건드리지 않으려고). 이 결과를 "Claude Code 연결 성공"이나 "어댑터 동작"으로 집계하지 않아 — Claude 쪽 실행 경로는 여전히 `claude.rs` 안에만 있고 등록·배선되지 않았어.
+- 남은 문제:
+  1. **승인 대기**: 실제 `claude -p` 1회로 stream-json 원문 캡처(외부 데이터 전송 + 계정 사용량). 이때까지 `claude.rs`의 이벤트 형식은 공개 문서 기준이야.
+  2. 어댑터 미등록·미배선 — `ConnectionKind::ClaudeCodeCli`·`ClaudeCodeAdapter`, `probe_install`의 claude 경로, `register_agent_instance`의 `claude_code`→`claude_code_cli` 연결, `worker`의 Claude 분기, `create_session`의 provider 선택, `claude_turn`이 모두 남아 있어. 등록을 먼저 하면 `support`가 `supported`로 올라가는데 실행 경로가 없어 거짓 표기가 되므로 **배선 뒤에 등록**해야 해.
+  3. 도구 정책 미확정 — `--permission-mode plan`이 대화 전용 계약을 실제로 지키는지 미검증.
+  4. 1단계 잔여 4건(GUI 실행 확인, `tauri-plugin-single-instance` 내부 경합, 원본 세션 전역 잠금=승인 대기, 종료 중 거절의 WebView 재현)은 그대로 차단 상태야.
+- 다음 작업: 이제 분기 없는 provider가 Codex로 새지 않으므로 `claude_turn` 배선을 다음 조각으로 진행할 수 있어. 순서는 (a) `worker`의 target 분기를 `turn_route`로 바꿔 Claude 분기 자리를 만들고 `claude_turn`(세션의 등록 인스턴스 → `claude::run` → 답변 저장)을 추가, (b) `create_session`에서 Claude 인스턴스를 provider로 선택, (c) 그 뒤 `ClaudeCodeAdapter` 등록과 `claude_code_cli` 매핑. 승인을 받으면 (a) 전에 실제 `claude -p` 캡처로 `parse_events`를 확정하는 편이 좋아.
+- 실행 메모(이 환경): `scripts/rust.ps1`은 `$ErrorActionPreference='Stop'`이라 cargo의 stderr 진행 메시지에서 끊겨 컴파일 오류가 없어도 exit 1로 보여. `.tools\cargo\bin\cargo.exe`를 `CARGO_HOME`/`RUSTUP_HOME`/`PATH`를 `.tools`로 맞춰 직접 실행할 것.
+
 ## Claude Code 턴 실행 경로 — 한 턴 = 한 프로세스, 취소·시간 초과 시 트리 종료 (2026-10-25, 3단계 두 번째 조각)
 
 - 선택한 작업: 3단계(추가 CLI 어댑터)의 다음 조각. 지난 회차는 프로토콜 골격만 세우고 "실행 경로가 없는데 `supported`로 승격하지 않으려고" 어댑터를 등록하지 않았어. 등록(`ClaudeCodeAdapter` + `claude_code_cli` 매핑 + `claude_turn` 배선)은 `agents.rs`·`registry.rs`·`engine.rs`·`store.rs`를 함께 건드려 이번 회차의 1~3파일 범위를 넘고, 등록보다 **먼저 실행 경로가 있어야** `support` 표기가 정직해져. 그래서 이번에는 실행 경로 한 조각만 만들었어.
