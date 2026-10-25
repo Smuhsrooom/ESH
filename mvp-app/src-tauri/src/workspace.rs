@@ -203,16 +203,30 @@ impl Store {
             })
             .map_err(err)
     }
+    /// Points a local session at the external session it is talking to. The
+    /// updated-row count is checked because the previous version bumped
+    /// `meta.revision` and returned `Ok(())` even when the session row did not
+    /// exist, so a caller could not tell a real bind from a no-op. `thread_id` is
+    /// part of the snapshot, so the revision bump belongs in the same transaction
+    /// as the update: either the WebView sees the new thread or nothing changed.
     pub fn bind_codex_session(&self, id: &str, thread: &str, session: &str) -> Result<()> {
-        let db = self.db.lock().map_err(err)?;
-        db.execute(
-            "UPDATE chat_sessions SET thread_id=?1,codex_session_id=?2 WHERE id=?3",
-            params![thread, session, id],
-        )
-        .map_err(err)?;
-        db.execute("UPDATE meta SET revision=revision+1", [])
+        if id.trim().is_empty() || thread.trim().is_empty() || session.trim().is_empty() {
+            return Err("세션 연결 정보가 비어 있습니다".into());
+        }
+        let mut db = self.db.lock().map_err(err)?;
+        let tx = db.transaction().map_err(err)?;
+        let changed = tx
+            .execute(
+                "UPDATE chat_sessions SET thread_id=?1,codex_session_id=?2 WHERE id=?3",
+                params![thread, session, id],
+            )
             .map_err(err)?;
-        Ok(())
+        if changed != 1 {
+            return Err("세션을 찾을 수 없습니다".into());
+        }
+        tx.execute("UPDATE meta SET revision=revision+1", [])
+            .map_err(err)?;
+        tx.commit().map_err(err)
     }
     pub fn add_session(
         &self,
@@ -366,5 +380,38 @@ mod tests {
             restored.session(&resume.id).unwrap().thread_id.as_deref(),
             Some("original-thread")
         );
+    }
+
+    #[test]
+    fn binding_an_external_session_reports_misses_instead_of_storing_nothing() {
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("bind.db");
+        let s = Store::open(&path).unwrap();
+        let session = s.create_session("default", "A").unwrap();
+        let before = s.snapshot().unwrap().revision;
+        s.bind_codex_session(&session.id, "thread-a", "rpc-a").unwrap();
+        let bound = s.session(&session.id).unwrap();
+        assert_eq!(bound.thread_id.as_deref(), Some("thread-a"));
+        assert_eq!(bound.session_id, "rpc-a");
+        // `thread_id` is part of the snapshot, so the bind has to be visible to
+        // snapshot consumers without waiting for an unrelated change.
+        assert!(s.snapshot().unwrap().revision > before);
+
+        // A missing row must fail loudly and leave the previous binding alone.
+        let after = s.snapshot().unwrap().revision;
+        assert!(s.bind_codex_session("missing-session", "thread-b", "rpc-b").is_err());
+        assert_eq!(s.snapshot().unwrap().revision, after);
+        assert_eq!(s.session(&session.id).unwrap().thread_id.as_deref(), Some("thread-a"));
+        // An empty thread or external id is not a binding; reject it instead of
+        // storing an empty string that reads like "not bound yet".
+        assert!(s.bind_codex_session(&session.id, "", "rpc-c").is_err());
+        assert!(s.bind_codex_session(&session.id, "thread-c", "  ").is_err());
+        assert_eq!(s.snapshot().unwrap().revision, after);
+        assert_eq!(s.session(&session.id).unwrap().thread_id.as_deref(), Some("thread-a"));
+
+        drop(s);
+        let restored = Store::open(&path).unwrap();
+        assert_eq!(restored.session(&session.id).unwrap().thread_id.as_deref(), Some("thread-a"));
+        assert_eq!(restored.session(&session.id).unwrap().session_id, "rpc-a");
     }
 }
