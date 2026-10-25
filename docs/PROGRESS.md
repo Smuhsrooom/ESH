@@ -1,5 +1,17 @@
 # ESH 진행 상태와 개발 인계
 
+## 종료 접수 차단을 생성·가져오기 명령까지 확장 (2026-10-25)
+
+- 선택한 작업: 로드맵 1단계(기존 기능 안정화) 잔여 항목인 "종료·큐·원본 동시 사용 실패 재현" 중 종료 접수 차단 공백. `submit`만 `accepting`을 검사해서 룸·세션 생성, 외부 세션 목록·가져오기, 모델 목록 command는 종료 중에도 worker job·SQLite 쓰기·단기 Codex 프로세스를 시작할 수 있었어.
+- 변경 파일: `mvp-app/src-tauri/src/engine.rs`(공용 `ensure_accepting` 함수와 `Engine::ensure_accepting`), `mvp-app/src-tauri/src/main.rs`(`create_room`, `create_session`, `list_codex_sessions`, `import_codex_session`, `list_codex_models` 진입부), `mvp-app/src-tauri/src/characterization_tests.rs`(회귀 1개).
+- 기존 `submit`·`request_compact`·`set_model_settings`·`set_opencode_model`의 검사와 오류 문구는 그대로 두었어. shutdown 순서(접수 차단 → worker 중지 → Arch 정리 → Codex 종료 → SQLite 확정), Blocking Delegation, `tool_deliveries`, Arch 타임아웃 120초(범위 30~600)는 변경하지 않았어. 새로 거절되는 경로는 종료 중에만 동작하므로 정상 실행 동작은 그대로야.
+- 검증 (실제 출력):
+  - `npm test` → `test result: ok. 51 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.64s` (기존 50 + 신규 1)
+  - `node scripts/verify_external_threads.mjs` → `{"passed":true,"recordedRows":27,"scratchRowsHidden":9,"normalConversationsPreserved":true}`
+- 이번 결과는 Rust 단위·분류 회귀 검사야. 실제 Tauri WebView에서 종료 중 command 경합을 재현한 검사가 아니고, `python scripts/verify_*.py`와 데스크톱 빌드는 실행하지 않았어. 신규 테스트는 접수 차단 판정 자체만 검사하며 command 배선은 컴파일과 코드 확인으로만 검증했어.
+- 남은 문제: `register_agent_instance`/`unregister_agent_instance`는 여전히 접수 차단 검사가 없어 종료 확정 단계의 SQLite 쓰기와 겹칠 수 있어. 원본 세션 동시 사용을 막는 전역 잠금도 여전히 없어.
+- 다음 작업: 등록·해제 command에도 같은 차단을 적용할지 결정하고, "종료 중 생성·가져오기 거절"을 실제 WebView에서 재현하는 검증 경로를 마련.
+
 ## 기준선 확인과 검증 환경 복구 (2026-10-25)
 
 - 로드맵 1단계(기존 기능 안정화) 기준선을 현재 트리에서 다시 확인했어. 코드는 변경하지 않았어.
