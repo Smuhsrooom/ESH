@@ -1,6 +1,6 @@
 use crate::{
     agents::{registered, AgentRole, CodexLeadSession, LeadAdapter, LeadSession, ReviewAdapter, ANTIGRAVITY, CODEX},
-    store::{err, ActiveRunSnapshot, Message, Result, Route, Snapshot, Store},
+    store::{err, ActiveRunSnapshot, Message, Result, Route, Session, Snapshot, Store},
 };
 use serde_json::{json, Value};
 use crate::models::{CodexModel, ModelSettings};
@@ -47,6 +47,49 @@ pub(crate) fn ensure_accepting(accepting: &AtomicBool) -> Result<()> {
         Err("앱을 종료 중이어서 새 작업을 받을 수 없습니다".into())
     }
 }
+/// Execution branch that owns one message. `None` means ESH has no branch for
+/// the pair, so the caller has to refuse it instead of letting `worker` fall
+/// through to Codex.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TurnRoute {
+    Codex,
+    OpenCode,
+    Arch,
+}
+
+/// Which branch may answer this message. A session only ever talks to the agent
+/// it is bound to; a Codex session additionally owns the Arch question channel,
+/// which is a delegated review rather than a second lead.
+///
+/// This is an allowlist on purpose. `worker` sends anything that is not
+/// `antigravity` or `opencode` to the Codex turn branch, so a provider without a
+/// branch of its own (a registered Claude Code instance, for example) would be
+/// answered by Codex and stored as if the session's own agent had replied.
+fn turn_route(session: &Session, target: &str) -> Option<TurnRoute> {
+    match session.provider.as_str() {
+        "codex" => match target {
+            "codex" => Some(TurnRoute::Codex),
+            "antigravity" => Some(TurnRoute::Arch),
+            _ => None,
+        },
+        "opencode" => (target == "opencode").then_some(TurnRoute::OpenCode),
+        _ => None,
+    }
+}
+
+/// Manual compaction is a Codex thread operation. An OpenCode session keeps its
+/// own CLI session id in `thread_id`, so passing that value to Codex compaction
+/// would compact a thread that does not exist and leave the session waiting on a
+/// compaction that can never finish.
+fn compact_thread(session: &Session) -> Result<&str> {
+    if session.provider != "codex" {
+        return Err("Codex 세션이 아니어서 컨텍스트를 압축할 수 없습니다".into());
+    }
+    session.thread_id.as_deref().ok_or_else(|| {
+        "이 세션은 아직 Codex 스레드가 없습니다. 먼저 메시지를 한 번 보내 주세요.".to_string()
+    })
+}
+
 /// Builds the Blocking Delegation payload that goes back on the original open
 /// tool call. `archReview` and `latestUserRequirements` stay separate keys so
 /// Codex can apply the user's newest requirements first, and `reviewIsStale`
@@ -350,7 +393,7 @@ impl Engine {
         };
         let local_id = session_id.unwrap_or("default-session".into());
         let saved = self.store.session(&local_id)?;
-        if (saved.provider == "opencode" && target != "opencode") || (saved.provider == "codex" && target == "opencode") {
+        if turn_route(&saved, &target).is_none() {
             return Err("이 세션의 에이전트와 메시지 대상이 다릅니다".into());
         }
         let settings = ModelSettings { model: saved.model, reasoning_effort: saved.reasoning_effort };
@@ -391,7 +434,7 @@ impl Engine {
         }
         let session = snapshot.sessions.iter().find(|s| s.id == session_id)
             .ok_or("압축할 세션을 찾을 수 없습니다")?;
-        let thread = session.thread_id.as_deref().ok_or("이 세션은 아직 Codex 스레드가 없습니다. 먼저 메시지를 한 번 보내 주세요.")?;
+        let thread = compact_thread(session)?;
         if snapshot.contexts.iter().any(|c| c.compaction == "compacting") {
             return Err("이미 컨텍스트를 압축하는 중입니다".into());
         }
@@ -1179,5 +1222,95 @@ mod opencode_commit_tests {
         let messages = store.snapshot().unwrap().messages;
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].delivery, "cancelled");
+    }
+}
+
+#[cfg(test)]
+mod session_route_tests {
+    use super::{compact_thread, turn_route, TurnRoute};
+    use crate::store::Store;
+
+    fn store() -> (tempfile::TempDir, Store) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("route.sqlite")).unwrap();
+        (dir, store)
+    }
+
+    fn opencode_session(dir: &std::path::Path, store: &Store) -> crate::store::Session {
+        let cli = dir.join("node_modules/opencode-ai/bin/opencode.exe");
+        std::fs::create_dir_all(cli.parent().unwrap()).unwrap();
+        std::fs::write(&cli, b"probe only").unwrap();
+        let instance = store.register_agent_instance("opencode", &cli.to_string_lossy(), "lead").unwrap();
+        let created = store.create_opencode_session("default", "OpenCode route", &instance.id).unwrap();
+        store.session(&created.id).unwrap()
+    }
+
+    #[test]
+    fn a_codex_session_owns_the_codex_turn_and_the_arch_question_channel() {
+        let (_dir, store) = store();
+        let saved = store.session("default-session").unwrap();
+        assert_eq!(saved.provider, "codex");
+        assert_eq!(turn_route(&saved, "codex"), Some(TurnRoute::Codex));
+        assert_eq!(turn_route(&saved, "antigravity"), Some(TurnRoute::Arch));
+        for target in ["opencode", "claude_code", "gemini_cli", ""] {
+            assert_eq!(turn_route(&saved, target), None, "{target}");
+        }
+    }
+
+    #[test]
+    fn an_opencode_session_only_answers_its_own_cli() {
+        let (dir, store) = store();
+        let saved = opencode_session(dir.path(), &store);
+        assert_eq!(saved.provider, "opencode");
+        assert_eq!(turn_route(&saved, "opencode"), Some(TurnRoute::OpenCode));
+        for target in ["codex", "antigravity", "claude_code"] {
+            assert_eq!(turn_route(&saved, target), None, "{target}");
+        }
+    }
+
+    #[test]
+    fn a_provider_without_a_branch_never_falls_through_to_codex() {
+        // The worker's last branch is the Codex turn, so a session whose provider
+        // has no branch yet must be refused for every target instead of being
+        // answered by Codex. This is the guard a Claude Code session needs before
+        // its own turn branch exists.
+        let (_dir, store) = store();
+        for provider in ["claude_code", "gemini_cli", "mock_agent", "unknown"] {
+            store
+                .db
+                .lock()
+                .unwrap()
+                .execute("UPDATE chat_sessions SET provider=?1 WHERE id='default-session'", [provider])
+                .unwrap();
+            let saved = store.session("default-session").unwrap();
+            assert_eq!(saved.provider, provider);
+            for target in ["codex", "antigravity", "opencode", provider] {
+                assert_eq!(turn_route(&saved, target), None, "{provider} -> {target}");
+            }
+        }
+    }
+
+    #[test]
+    fn manual_compaction_is_a_codex_thread_operation_only() {
+        let (dir, store) = store();
+        let codex = store.session("default-session").unwrap();
+        assert!(compact_thread(&codex).unwrap_err().contains("스레드가 없습니다"));
+        // The Codex connection binds its thread on the first turn; compaction
+        // needs exactly that thread id.
+        store.bind_codex_session("default-session", "thread-a", "sess-a").unwrap();
+        let codex = store.session("default-session").unwrap();
+        assert_eq!(compact_thread(&codex).unwrap(), "thread-a");
+        // An OpenCode session stores its own CLI session id in `thread_id`, so it
+        // looks compactable to a thread-only check but must be refused.
+        let opencode = opencode_session(dir.path(), &store);
+        store
+            .db
+            .lock()
+            .unwrap()
+            .execute("UPDATE chat_sessions SET thread_id='ses_opencode' WHERE id=?1", [&opencode.id])
+            .unwrap();
+        let opencode = store.session(&opencode.id).unwrap();
+        assert_eq!(opencode.thread_id.as_deref(), Some("ses_opencode"));
+        assert!(compact_thread(&opencode).unwrap_err().contains("Codex 세션이 아니어서"));
     }
 }
