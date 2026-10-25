@@ -1,5 +1,19 @@
 # ESH 진행 상태와 개발 인계
 
+## 종료 접수 차단을 에이전트 등록·해제와 OpenCode 모델 조회까지 확장 (2026-10-25)
+
+- 선택한 작업: 로드맵 1단계(기존 기능 안정화) 잔여 항목 "종료·큐·원본 동시 사용 실패 재현" 중 앞선 회차가 남긴 접수 차단 공백. `register_agent_instance`/`unregister_agent_instance`는 종료 중에도 `agent_instances`·`agents` 행을 쓰거나 지울 수 있었고, `list_opencode_models`는 종료 중에도 단기 OpenCode CLI 프로세스를 새로 띄울 수 있었어.
+- 변경 파일: `mvp-app/src-tauri/src/registry.rs`(명령 진입용 `register_instance`/`unregister_instance`와 회귀 1개), `mvp-app/src-tauri/src/main.rs`(두 등록 명령이 새 함수를 쓰도록 교체, `list_opencode_models` 진입부 검사), `mvp-app/src-tauri/src/engine.rs`(`admission()` 접근자만 추가).
+- 차단 검사를 Tauri 래퍼가 아니라 저장소 호출 바로 옆에 둔 이유는 판정 순서(검사 → 쓰기 없음)를 앱 없이 단위 테스트로 확인하기 위해서야. 기존 `submit`·`request_compact`·`set_model_settings`·`set_opencode_model`의 검사와 오류 문구, shutdown 순서, Blocking Delegation, `tool_deliveries`, Arch 타임아웃 120초(범위 30~600), DB 스키마·사용자 데이터는 변경하지 않았어.
+- 검증 (실제 출력):
+  - `npm test` → `test result: ok. 52 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.62s` (기존 51 + 신규 1)
+  - `node scripts/verify_external_threads.mjs` → `{"passed":true,"recordedRows":27,"scratchRowsHidden":9,"normalConversationsPreserved":true}`
+  - `npm run build` → `✓ built in 2.79s` (`dist/assets/index-B_6vxOOa.js` 433.29 kB)
+- 신규 테스트 `registration_writes_are_refused_while_closing`는 실제 SQLite에 등록 행을 만든 뒤 접수를 닫고, 등록·해제가 `종료 중` 오류로 거절되며 행 수가 변하지 않고 기존 행이 남는지, 이후 호출도 계속 거절되는지를 확인해. 이는 명령 본문이 호출하는 함수 경로를 직접 검사한 것이고, Tauri 명령 배선 자체는 컴파일과 코드 확인으로만 검증했어.
+- 이번 결과는 Rust 단위·분류 회귀 검사야. 실제 Tauri WebView에서 종료 중 명령 경합을 재현한 검사가 아니고, `python scripts/verify_*.py`와 데스크톱 빌드는 실행하지 않았어. OpenCode CLI를 실제로 띄워 종료 중 거절을 확인한 것도 아니야.
+- 남은 문제: 원본 세션 동시 사용을 막는 전역 잠금은 여전히 없어. `Store::tool_state`는 없는 전달 키를 갱신해도 성공을 돌려주고, `confirm_tool`은 `turn_id`가 없을 때 `null` 키로 조회해 조용히 아무 행도 갱신하지 않은 채 `review_confirmed` audit을 남길 수 있어.
+- 다음 작업: "종료 중 생성·가져오기·등록 거절"을 실제 WebView에서 재현하는 검증 경로를 마련하거나, `tool_state`의 무음 성공을 제거할지 결정.
+
 ## 종료 접수 차단을 생성·가져오기 명령까지 확장 (2026-10-25)
 
 - 선택한 작업: 로드맵 1단계(기존 기능 안정화) 잔여 항목인 "종료·큐·원본 동시 사용 실패 재현" 중 종료 접수 차단 공백. `submit`만 `accepting`을 검사해서 룸·세션 생성, 외부 세션 목록·가져오기, 모델 목록 command는 종료 중에도 worker job·SQLite 쓰기·단기 Codex 프로세스를 시작할 수 있었어.
