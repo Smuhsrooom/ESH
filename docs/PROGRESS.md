@@ -1,5 +1,19 @@
 # ESH 진행 상태와 개발 인계
 
+## 리뷰 응답 봉투의 요구사항 버전·목록 단일 읽기 (2026-10-25)
+
+- 선택한 작업: 로드맵 1단계(기존 기능 안정화) 잔여 항목 중 Blocking Delegation 응답 봉투의 최신 요구사항 정합성. `engine.rs`는 `latestUserRequirements.messages`를 `store.snapshot()`에서 뽑고, `latestUserRequirements.conversationVersion`과 `reviewIsStale`을 각각 **다른** `session_version()` 호출로 읽었어. 사용자 입력은 Tauri command 스레드에서 별도로 커밋되므로 그 사이에 새 메시지가 들어오면 봉투의 두 절반이 서로 다른 대화 버전을 가리킬 수 있었어(버전 N+1인데 `messages`가 비어 있거나, 반대로 `messages`에 들어간 요구사항이 `reviewIsStale` 계산에 반영되지 않음). `archReview`와 `latestUserRequirements`를 구조적으로 분리하고 `reviewIsStale`을 보존한다는 계약을 코드 한 곳에서 보장하도록 고쳤어.
+- 변경 파일: `mvp-app/src-tauri/src/store.rs`(`pending_requirements(session) -> Result<(i64, Vec<Message>)>` 추가 — 한 번의 DB 락 안에서 세션 버전과 `queued` 사용자 메시지를 함께 읽고 `substr(content,1,6)!='@arch '`로 `@arch` 직접 질문을 제외, 회귀 테스트 1개), `mvp-app/src-tauri/src/engine.rs`(봉투 조립을 순수 함수 `review_envelope(review, review_version, requirements_version, pending)`로 분리하고 `codex_turn`이 이를 사용, 회귀 테스트 1개).
+- 동작 보존: 봉투의 키 이름·구조(`kind`, `archReview`, `latestUserRequirements{conversationVersion,messages}`, `reviewIsStale`, `processingOrder`)와 `processingOrder` 순서, `@arch` 제외 규칙, 봉투 전송 후 `bind_messages` + `delivery("delivered")` 순서는 그대로야. Blocking Delegation(같은 RPC 호출에 결과 반환), 열린 도구 호출 유지, `tool_deliveries` 상태 전이, 종료 순서, Arch 타임아웃 120초(범위 30~600), DB 스키마·`user_version=6`, 사용자 메시지·세션·컨텍스트는 변경하지 않았어. 바뀐 것은 두 값이 같은 읽기에서 나온다는 점뿐이고, 경합이 없을 때의 결과 값은 이전과 같아. `store.snapshot()` 전체 읽기가 사라져 메시지 전체를 매 리뷰마다 복사하던 비용도 없어졌어.
+- 검증 (실제 출력):
+  - `npm test` → `test result: ok. 58 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.51s` (기존 56 + 신규 2, `store::tests::pending_requirements_share_one_version_and_skip_arch_and_foreign_sessions ... ok`, `engine::envelope_tests::review_and_latest_requirements_stay_separate_with_an_explicit_staleness_flag ... ok`)
+  - `node scripts/verify_external_threads.mjs` → `{"passed":true,"recordedRows":27,"scratchRowsHidden":9,"normalConversationsPreserved":true}`
+  - `npm run build` → `✓ built in 2.31s` (`dist/assets/index-B_6vxOOa.js` 433.29 kB, `index-YBSTmYxd.css` 52.24 kB, `guiProbe-djswdxyz.js` 45.64 kB)
+- 신규 테스트 내용: `pending_requirements`는 세션 버전과 `queued` 사용자 메시지만 돌려주고 `@arch` 직접 질문과 다른 세션의 대기 입력을 제외하며, `delivered`로 바꾸면 목록이 비고 세션 버전은 그대로인지(전달은 `chat_sessions.version`을 올리지 않음), 없는 세션은 오류인지를 확인해. 봉투 테스트는 버전이 같으면 `reviewIsStale=false`이고 `latestUserRequirements`가 비어 있어도 키가 존재하는지, 버전이 다르면 `reviewIsStale=true`이면서 늦은 요구사항이 `latestUserRequirements.messages`에 `queued` 상태로 들어가고 `archReview`에는 `messages`·`latestUserRequirements`가 섞이지 않는지, `processingOrder`가 `["latestUserRequirements","archReview"]`인지를 확인해. 저장소·순수 함수 계층만 검사해.
+- 이번 결과는 Rust 단위 회귀 검사야. 실제 Codex App Server가 `request_arch_review`를 호출해 이 봉투를 받는 경로, 실제 WebView의 협업 패널 표시는 확인하지 않았어. `python scripts/verify_*.py`와 데스크톱 빌드는 실행하지 않았어(변경이 Rust 백엔드이고 실행 중인 앱을 건드리지 않기 위해). 두 번의 읽기 사이에 메시지가 끼어드는 경합 자체를 테스트로 재현한 것은 아니고, 값이 한 읽기에서 나온다는 구조와 봉투 조립 결과만 검사했어.
+- 남은 문제: (a) 중복 실행 수정의 실행 확인(두 번째 실행이 기존 창을 앞으로 가져오는지, 정상 종료 후 `msedgewebview2` 잔존 여부)은 여전히 사용자 환경 확인이 필요해. (b) `tauri-plugin-single-instance` 2.5.4의 `FindWindowW` 경합은 플러그인 내부 한계로 남아 있어. (c) 원본 세션 전역 잠금 설계는 **승인 대기**. (d) "종료 중 거절"의 실제 WebView 재현 경로는 이 자동화 환경의 WebView2 초기화 실패로 만들지 못한 상태 그대로야.
+- 다음 작업: `verify_live.py`로 실제 Arch 리뷰 봉투 수신을 한 번 확인하거나(실제 CLI 사용량·원본 저장소 부작용 있음), 남은 1단계 항목 정리 후 2단계(Mock Agent 검증) 체크리스트의 미검증 항목(`reviewIsStale`·`latestUserRequirements`는 이번에 저장소·봉투 계층까지 확보)을 실제 어댑터 경로로 좁혀 확인.
+
 ## 중복 실행 시 검은 창·렌더링 실패 대응 (2026-10-25)
 
 - 선택한 작업: 사용자가 보고한 "여러 번 실행하면 창이 검게 나오거나 렌더링이 안 되고, 강제 종료를 반복하면 `%LOCALAPPDATA%\local.esh.conversation\EBWebView` 프로필이 오염된다" 문제. 코드로 확인한 결과 **단일 인스턴스 장치가 전혀 없었어**(`grep -rn "single_instance\|CreateMutex"` 결과 0건). 두 번째 프로세스가 같은 앱 식별자로 WebView2 user data 폴더를 동시에 잡고, 강제 종료로 남은 `msedgewebview2` 자식이 폴더를 쥔 채 새 인스턴스가 뜨는 경로가 그대로 열려 있었어.
