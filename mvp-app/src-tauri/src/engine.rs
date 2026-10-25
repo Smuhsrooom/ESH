@@ -93,6 +93,49 @@ fn matches_compaction_item(event: &serde_json::Value, thread: &str, turn: &str, 
         && id.is_some()
         && (item.is_none() && method == "item/started" || item == id)
 }
+/// Applies one Codex event to the public-answer drafts and reports whether the
+/// stored conversation changed, so the caller emits exactly once when it did.
+/// Thread and turn have to match the running turn: a late event from a finished
+/// turn is dropped instead of being written into the current answer, and only
+/// `agentMessage` items reach the drafts (tool calls and compaction stay out).
+pub(crate) fn apply_stream_event(
+    streams: &mut crate::stream::Streams,
+    store: &Store,
+    event: &Value,
+    thread: &str,
+    turn: &str,
+    session: &str,
+) -> Result<bool> {
+    let p = &event["params"];
+    if p["threadId"] != thread || p["turnId"] != turn {
+        return Ok(false);
+    }
+    match event["method"].as_str().unwrap_or_default() {
+        "item/started" if p["item"]["type"] == "agentMessage" => {
+            if let Some(id) = p["item"]["id"].as_str() {
+                streams.start(id, p["item"]["phase"].as_str(), thread, turn, session);
+            }
+            Ok(false)
+        }
+        "item/agentMessage/delta" => match (p["itemId"].as_str(), p["delta"].as_str()) {
+            (Some(id), Some(delta)) => streams.delta(store, id, delta),
+            _ => Ok(false),
+        },
+        "item/completed" if p["item"]["type"] == "agentMessage" => match p["item"]["id"].as_str() {
+            Some(id) => streams.complete(
+                store,
+                id,
+                p["item"]["text"].as_str().unwrap_or_default(),
+                p["item"]["phase"].as_str(),
+                thread,
+                turn,
+                session,
+            ),
+            None => Ok(false),
+        },
+        _ => Ok(false),
+    }
+}
 struct ActiveRun {
     snapshot: ActiveRunSnapshot,
     stop: watch::Sender<bool>,
@@ -744,36 +787,19 @@ impl Engine {
             let method = event["method"].as_str().unwrap_or_default();
             if crate::context::is_event(&event) { self.emit()?; }
             match method {
-                "item/started" => {
-                    let p = &event["params"];
-                    if p["threadId"] == rpc.thread_id && p["turnId"] == json!(rpc.turn_id) && p["item"]["type"] == "agentMessage" {
-                        if let Some(id) = p["item"]["id"].as_str() {
-                            self.streams.lock().map_err(err)?.start(id, p["item"]["phase"].as_str(), &rpc.thread_id, rpc.turn_id.as_deref().unwrap(), &user.chat_session_id);
-                        }
-                    }
-                }
-                "item/agentMessage/delta" => {
-                    let p = &event["params"];
-                    if p["threadId"] == rpc.thread_id && p["turnId"] == json!(rpc.turn_id) {
-                        if let (Some(id),Some(delta)) = (p["itemId"].as_str(),p["delta"].as_str()) {
-                            let changed = self.streams.lock().map_err(err)?.delta(&self.store,id,delta)?;
-                            if changed { self.emit()?; }
-                        }
-                    }
-                }
-                "item/completed" => {
-                    let p = &event["params"];
-                    if p["threadId"] != rpc.thread_id || p["turnId"] != json!(rpc.turn_id) {
-                        continue;
-                    }
-                    let item = &p["item"];
-                    if item["type"] == "agentMessage" {
-                        if let Some(id) = item["id"].as_str() {
-                            let changed = self.streams.lock().map_err(err)?.complete(&self.store,id,item["text"].as_str().unwrap_or_default(),item["phase"].as_str(),&rpc.thread_id,rpc.turn_id.as_deref().unwrap(),&user.chat_session_id)?;
-                            if changed { self.emit()?; }
-                        }
-                    }
-                    if item["type"] == "dynamicToolCall" && rpc.confirm_tool(item)? {
+                "item/started" | "item/agentMessage/delta" | "item/completed" => {
+                    let turn = rpc.turn_id.clone().unwrap_or_default();
+                    let changed = {
+                        let mut streams = self.streams.lock().map_err(err)?;
+                        apply_stream_event(&mut streams, &self.store, &event, &rpc.thread_id, &turn, &user.chat_session_id)?
+                    };
+                    if changed { self.emit()?; }
+                    if method == "item/completed"
+                        && event["params"]["threadId"] == rpc.thread_id
+                        && event["params"]["turnId"] == json!(rpc.turn_id)
+                        && event["params"]["item"]["type"] == "dynamicToolCall"
+                        && rpc.confirm_tool(&event["params"]["item"])?
+                    {
                         self.state("codex", "running", "검토 결과를 반영하는 중")?;
                     }
                 }
