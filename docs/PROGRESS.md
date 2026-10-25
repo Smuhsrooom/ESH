@@ -1,5 +1,32 @@
 # ESH 진행 상태와 개발 인계
 
+## Claude Code 턴 실행 경로 — 한 턴 = 한 프로세스, 취소·시간 초과 시 트리 종료 (2026-10-25, 3단계 두 번째 조각)
+
+- 선택한 작업: 3단계(추가 CLI 어댑터)의 다음 조각. 지난 회차는 프로토콜 골격만 세우고 "실행 경로가 없는데 `supported`로 승격하지 않으려고" 어댑터를 등록하지 않았어. 등록(`ClaudeCodeAdapter` + `claude_code_cli` 매핑 + `claude_turn` 배선)은 `agents.rs`·`registry.rs`·`engine.rs`·`store.rs`를 함께 건드려 이번 회차의 1~3파일 범위를 넘고, 등록보다 **먼저 실행 경로가 있어야** `support` 표기가 정직해져. 그래서 이번에는 실행 경로 한 조각만 만들었어.
+- 변경 파일: `mvp-app/src-tauri/src/claude.rs` 1개.
+  - `turn_args(existing, model, prompt)` 추가 — `command_args` 뒤에 프롬프트를 **마지막 위치 인자**로 붙여. 설치본 `--help` 1행이 `Usage: claude [options] [command] [prompt]`, 7행이 `prompt  Your prompt`로 위치 인자를 선언하고 있어 그 형태를 그대로 써. 프롬프트가 플래그 값 자리에 끼어들지 않아.
+  - `run(path, work_dir, existing, model, prompt, stop)` 추가 — `opencode::run`과 같은 형태야. 실행 파일이 파일이 아니면 시작 전에 거절하고, 빈 요청도 프로세스를 띄우기 전에 거절해. `current_dir(work_dir)`, stdin null, stdout/stderr 파이프, `kill_on_drop`, 창 숨김.
+  - `collect(command, expected, stop, limit)` 분리 — 캡처·대기·판정만 담당하는 내부 함수야. `stop.changed()`나 180초 시간 초과에서 `cli::stop_tree`로 **프로세스 트리 전체**를 끝낸 뒤 오류를 돌려줘 고아 프로세스가 남지 않아. stdout 4,194,305 / stderr 65,537 바이트 상한을 넘으면 실패. 종료 코드가 0이 아니면 코드만 알리고 **stderr 본문은 호출자에게 전달하지 않아**(내부 맥락 유출 방지). 성공하면 `parse_events`로 분류.
+- 동작 보존: `command_args`·`parse_events`·`Answer`·`CONNECTION_KIND`는 값·시그니처를 바꾸지 않았어. `main.rs`의 `mod claude;` 한 줄도 그대로고 새 모듈·새 Tauri 명령·새 DB 쓰기·스키마 변경은 없어. Blocking Delegation, `request_arch_review`, `archReview`/`latestUserRequirements` 분리, `tool_deliveries`, 종료 순서, Arch 타임아웃 120초(범위 30~600), 단일 worker, `user_version=6`, 실행 파일 이름 `esh-chat-mvp4` 모두 그대로야.
+- **`support` 표기는 이번에도 바뀌지 않았어.** `run`이 아직 어디에서도 호출되지 않으므로(모듈 단위 `#![allow(dead_code)]` 유지) `registered()`·`active_role`·`probe_agents()`·Agents 화면·`snapshot.agents` 값은 이전과 같고, 등록된 Claude 인스턴스는 여전히 `unsupported`/`unavailable`이야. 실행 경로가 생겼다는 이유만으로 `supported`로 올리지 않았어 — Engine 배선이 없으면 실제 턴이 만들어지지 않기 때문이야.
+- 검증 (실제 출력):
+  - `cargo test --bin esh-chat-mvp4` (프로젝트 상위 `.tools`의 cargo를 직접 실행) → `test result: ok. 75 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.25s` (기존 70 + 신규 5). 신규: `claude::tests::the_prompt_is_the_trailing_positional_argument`, `a_stub_stream_is_captured_and_classified_through_the_real_process_path`, `a_failed_exit_reports_the_code_without_leaking_stderr`, `a_cancelled_or_slow_turn_stops_the_child_instead_of_waiting`, `a_missing_cli_or_an_empty_request_fails_before_any_process_starts` — 모두 `ok`. 기존 `claude::tests::*` 7개도 모두 `ok`.
+  - `node scripts/verify_external_threads.mjs` → `{"passed":true,"recordedRows":27,"scratchRowsHidden":9,"normalConversationsPreserved":true}`
+  - `npm run build` → `✓ built in 2.66s` (`dist/assets/index-B_6vxOOa.js` 433.29 kB, `index-YBSTmYxd.css` 52.24 kB, `guiProbe-djswdxyz.js` 45.64 kB — 프런트를 건드리지 않아 해시 동일)
+  - Rust 경고는 기존 2건(`agents.rs`의 `Authenticated`·`Required`·`Error`, `Ready` 미사용 variant)뿐이고 `claude.rs`에서 새 경고는 없어.
+- 신규 테스트가 실제로 확인한 것: (1) `turn_args`의 마지막 원소가 프롬프트이고 앞부분이 `command_args`와 같으며 프롬프트가 플래그 자리에 없다는 것, (2) 스텁 자식 프로세스(powershell)가 실제로 띄운 NDJSON을 캡처해 `stub answer`로 분류하고 기대 세션과 다르면 `세션 ID가 일치하지 않습니다`로 실패한다는 것, (3) 종료 코드 3이면 `종료 코드`를 포함한 오류가 나오고 스텁이 stderr에 쓴 `secret-context-value`는 메시지에 없다는 것, (4) 취소 신호와 200ms 제한에서 각각 `중단`·`시간 초과`로 끝나고 자식이 종료된다는 것, (5) 없는 실행 파일과 공백 프롬프트는 프로세스를 띄우기 전에 거절된다는 것(플레이스홀더 exe는 실행되지 않음).
+- 이 검증의 경계(중요):
+  - 프로세스 배관(스폰·캡처·종료 코드·취소·시간 초과)은 **스텁 자식 프로세스**로 검증한 것이고, 설치된 `claude.exe`를 실제로 실행한 결과가 아니야. 실제 `claude -p` 1회는 프롬프트가 외부 API로 나가고 계정 사용량을 쓰므로 **여전히 승인 대기**야. 따라서 이 경로를 "Claude Code 연결 성공"으로 집계하지 않아.
+  - 스트림 이벤트 형식은 지난 회차와 같이 공개 headless/SDK 문서 기준이며 실제 출력으로 확정되지 않았어.
+  - `python scripts/verify_*.py`와 데스크톱 빌드는 실행하지 않았어(변경이 Rust 모듈 내부이고 실행 중인 앱을 건드리지 않으려고). WebView·GUI 확인도 하지 않았어.
+- 남은 문제:
+  1. **승인 대기**: 실제 `claude -p` 1회로 stream-json 원문을 캡처해 `parse_events`와 `run`의 종료·출력 형태를 실제 형식으로 확정하는 일(외부 데이터 전송 + 계정 사용량).
+  2. 어댑터 미등록·미배선 — `ConnectionKind::ClaudeCodeCli`·`ClaudeCodeAdapter`(descriptor), `register_agent_instance`의 `claude_code`→`claude_code_cli` 연결, `active_role` 매핑, 세션 provider(`create_session`)와 Engine `claude_turn` 분기가 모두 남아 있어. 4개 파일에 걸쳐 있어 다음 조각에서 등록·매핑과 배선을 나눠 진행해야 해.
+  3. 도구 정책 미확정 — `--permission-mode plan`은 설치본이 선언한 모드 중 보수적 선택일 뿐, 대화 전용 계약을 실제로 지키는지 검증되지 않았어. `--permission-prompts none`·`--disallowedTools` 조합도 실제 실행 확인 뒤에 정해야 해.
+  4. 1단계 잔여 4건(GUI 실행 확인, `tauri-plugin-single-instance` 내부 경합, 원본 세션 전역 잠금, 종료 중 거절의 WebView 재현)은 그대로 차단 상태야.
+- 다음 작업: (a) 승인 시 `claude -p` 1회 캡처로 파서·실행 형태 확정, (b) 승인 없이는 `ConnectionKind::ClaudeCodeCli` + `ClaudeCodeAdapter` descriptor + `registry.rs`의 `claude_code_cli` 연결/`active_role` 매핑을 한 조각으로 하되, Engine `claude_turn` 배선 전까지는 `submit`이 그 세션을 Codex 턴으로 보내지 않도록 provider 검사부터 닫아 둘 것.
+- 실행 메모(이 환경): `scripts/rust.ps1`은 `$ErrorActionPreference='Stop'`이라 cargo가 stderr로 쓰는 진행 메시지에서 `NativeCommandError`로 끊겨 **실제 컴파일 오류가 없어도 exit 1**로 보여. `.tools\cargo\bin\cargo.exe`를 직접 실행하면 정상 출력·종료 코드를 얻을 수 있어.
+
 ## Claude Code 호출 계약·stream-json 분류 골격 (2026-10-25, 3단계 첫 조각)
 
 - 선택한 작업: 3단계(추가 CLI 어댑터) 첫 조각 — Claude Code Lead 어댑터의 **비파괴 probe + 프로토콜 골격**. 직전 결정대로 1단계 항목은 더 캐지 않았어. 이번 조각은 **어댑터 등록·세션 경로·Engine 배선 없이** 프로토콜 정의만 세우는 단계야.
