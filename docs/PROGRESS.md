@@ -1,5 +1,21 @@
 # ESH 진행 상태와 개발 인계
 
+## 외부 세션 연결의 무음 성공 제거 (2026-10-25)
+
+- 선택한 작업: 1단계(기존 기능 안정화) 잔여 항목 중 지난 회차가 남긴 "`bind_codex_session` 무음 성공". 이 함수는 `UPDATE chat_sessions SET thread_id=?,codex_session_id=? WHERE id=?`의 갱신 행 수를 보지 않고 `meta.revision`을 올린 뒤 `Ok(())`를 돌려줬어. 세션 행이 없으면 아무것도 저장되지 않았는데 호출부는 성공으로 처리했고, 반대로 정상 저장 때도 `thread_id`가 snapshot에 포함되는데 revision을 같은 트랜잭션에서 올리지 않아 두 문장 사이에 실패하면 화면이 이전 thread를 계속 보여줄 수 있었어. `tool_state`·`status`·`confirm_tool`에서 이미 제거한 무음 성공 유형의 마지막 남은 하나야.
+- 변경 파일:
+  - `mvp-app/src-tauri/src/workspace.rs` — `bind_codex_session`이 빈 `id`·`thread`·`session`을 거절하고, 갱신을 `db.transaction()` 안에서 수행해 갱신 행이 정확히 1이 아니면 `세션을 찾을 수 없습니다` 오류를 반환해. `meta.revision` 증가는 같은 트랜잭션에서 갱신이 성립한 뒤에만 일어나고, 커밋도 그 안에서 끝나. 회귀 테스트 1개 추가.
+- 동작 보존: `chat_sessions` 스키마·`user_version=6`, `thread_id`/`codex_session_id`에 쓰는 값, `tool_deliveries`, Blocking Delegation, `request_arch_review`, `archReview`/`latestUserRequirements` 구조적 분리, 종료 순서와 접수 차단, Arch 타임아웃 120초(범위 30~600), 단일 worker는 변경하지 않았어. 두 호출부(`engine.rs`의 Codex 연결 확립 직후, `commit_opencode_answer`의 OpenCode 마감)는 모두 직전에 `store.session(...)`으로 세션 존재를 확인한 뒤 호출하므로 정상 경로의 쓰기 값·순서는 그대로야. 바뀐 것은 "행이 없을 때 조용히 성공" 대신 오류를 돌려주고, 성공 시 `meta.revision`이 함께 오른다는 점뿐이야.
+- 검증 (실제 출력):
+  - `npm test` → `test result: ok. 62 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.73s` (기존 61 + 신규 1, `workspace::tests::binding_an_external_session_reports_misses_instead_of_storing_nothing ... ok`)
+  - `node scripts/verify_external_threads.mjs` → `{"passed":true,"recordedRows":27,"scratchRowsHidden":9,"normalConversationsPreserved":true}`
+  - `npm run build` → `✓ built in 3.53s` (`dist/assets/index-B_6vxOOa.js` 433.29 kB, `index-YBSTmYxd.css` 52.24 kB, `guiProbe-djswdxyz.js` 45.64 kB)
+  - Rust 경고는 기존 3건(`agents.rs`의 미사용 variant)과 cargo의 증분 디렉터리 lock 삭제 경고 1건뿐이고 `workspace.rs` 관련 새 경고는 없어.
+- 신규 테스트 내용: 세션을 만들고 바인딩하면 `thread_id`·`session_id`가 저장되고 snapshot `revision`이 증가하는지, 없는 세션 ID로 호출하면 오류가 나며 revision이 그대로이고 기존 바인딩이 유지되는지, 빈 thread·공백 session ID도 같은 방식으로 거절되는지, 재개방 후에도 바인딩이 남는지를 확인해. 저장소 계층만 검사해.
+- 이번 결과는 Rust 단위·분류 회귀 검사야. 실제 Codex App Server 연결에서 `bind_codex_session`이 호출되는 경로, 실제 OpenCode 턴 마감, 실제 WebView의 thread 표시 갱신은 확인하지 않았어. `python scripts/verify_*.py`와 데스크톱 빌드는 실행하지 않았어(변경이 Rust 백엔드이고 실행 중인 앱을 건드리지 않으려고).
+- 남은 문제: (a) 1단계 잔여 4건(GUI 실행 확인, `tauri-plugin-single-instance` 내부 경합, 원본 세션 전역 잠금=**승인 대기**, 종료 중 거절의 WebView 재현)은 그대로 차단 상태야. (b) OpenCode 턴에서 CLI가 답을 만든 뒤 확정이 실패하면 그 답변 텍스트는 여전히 저장되지 않아(중단된 턴의 답변을 남길지 여부는 UX 결정이 필요해). (c) `bind_messages`는 여전히 갱신 행 수를 확인하지 않아 같은 무음 성공 유형이 남아 있어(호출 경로상 방금 만든 메시지 ID만 넘어와 실제 실패 가능성은 낮아).
+- 다음 작업: (b)의 답변 보존 여부를 결정하거나, `bind_messages`의 무음 성공을 같은 방식으로 정리. 2단계 Mock 체크리스트는 "단일 worker 직렬성"만 `AppHandle` 의존이라 단위 검사로 닫을 수 없는 상태야.
+
 ## OpenCode 턴 확정 순서 수정 — 취소된 턴이 외부 세션을 옮기지 않게 (2026-10-25)
 
 - 선택한 작업: 1단계(기존 기능 안정화) 범위의 OpenCode Lead 턴 마감 순서. `engine.rs`의 `opencode_turn`은 CLI 답변을 받은 뒤 **먼저** `bind_codex_session`으로 `chat_sessions.thread_id`·`codex_session_id`를 새 외부 세션으로 옮기고, **그다음** `confirm_turn_start`로 사용자 메시지의 턴 결합을 확정했어. `confirm_turn_start`는 `delivery='queued'`인 행만 갱신하고 아니면 오류를 돌려주므로, CLI가 답하는 사이에 사용자가 중단해 메시지가 `cancelled`가 되면 (1) 외부 세션 포인터는 이미 새 세션으로 이동하고 (2) 답변은 저장되지 않아. 그 결과 다음 턴은 로컬 기록에 없는 답변을 포함한 외부 세션을 이어쓰게 돼 로컬 기록과 CLI 맥락이 어긋났어.
