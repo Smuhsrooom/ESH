@@ -1,5 +1,19 @@
 # ESH 진행 상태와 개발 인계
 
+## 도구 응답 확인의 무음 성공 제거 (2026-10-25)
+
+- 선택한 작업: 로드맵 1단계(기존 기능 안정화) 잔여 항목 중 앞선 회차가 남긴 "`Store::tool_state` 무음 성공, 특히 `confirm_tool`의 `turn_id=None` → `null` 키". `confirm_tool`은 `self.turn_id`가 없을 때 `null`을 포함한 키로 갱신을 시도했고, `tool_state`는 갱신 행이 0개여도 `Ok(())`를 돌려줘 실제로 저장되지 않은 상태를 `confirmed`로, `review_confirmed` audit까지 남길 수 있었어.
+- 변경 파일: `mvp-app/src-tauri/src/store.rs`(`tool_state`가 갱신 행 수 일치 여부를 `bool`로 반환), `mvp-app/src-tauri/src/cli.rs`(`confirm_tool`이 `Result<bool>` 반환, turn ID 없음·행 불일치 시 `review_confirm_unmatched` audit 후 `false`), `mvp-app/src-tauri/src/engine.rs`(`dynamicToolCall` 완료 시 확인이 실제로 성립한 경우에만 `검토 결과를 반영하는 중` 상태로 전환).
+- 동작 보존: `prepared → sent → confirmed/unknown` 상태 값과 `tool_deliveries` 스키마, 재시작 시 `prepared`·`sent` → `unknown` 처리, Blocking Delegation, `request_arch_review`, archReview/latestUserRequirements 분리, 종료 순서, Arch 타임아웃 120초(범위 30~600)는 변경하지 않았어. `resolve_once`의 `sent`·`unknown` 기록은 `reserve_tool` 직후라 행이 보장되므로 호출부를 바꾸지 않았어.
+- 검증 (실제 출력):
+  - `npm test` → `test result: ok. 52 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.69s` (신규 테스트 파일 없이 기존 `cli::tests::mock_stdio_keeps_one_tool_reply_on_the_original_rpc_id`에 회귀 4개 항목 추가)
+  - `node scripts/verify_external_threads.mjs` → `{"passed":true,"recordedRows":27,"scratchRowsHidden":9,"normalConversationsPreserved":true}`
+  - `npm run build` → `✓ built in 3.13s` (`dist/assets/index-B_6vxOOa.js` 433.29 kB)
+- 회귀 검사 내용: 정상 확인은 `true`와 `confirmed` 유지. `turn_id=None`에서 확인 시 `false`·`review_confirmed` audit 수 불변·`review_confirm_unmatched` 1건·`call_key LIKE '%:null:%'` 행 0건. 없는 키에 대한 `tool_state`는 `false`. 기존 `codex_tx` audit 1회·중복 응답 차단·전송 실패 `unknown` 검사도 그대로 통과했어.
+- 이번 결과는 Rust 단위·분류 회귀 검사야. 실제 Codex App Server가 `dynamicToolCall` 완료를 보내는 경로를 실제 CLI로 재현한 검사가 아니고, `python scripts/verify_*.py`와 데스크톱 빌드는 실행하지 않았어. `confirm_tool`이 `false`를 반환하는 상황(턴 ID 소실·키 불일치)은 실제 CLI에서 강제로 만들지 않았어.
+- 남은 문제: 원본 세션 동시 사용을 막는 전역 잠금은 여전히 없어. `Store::status`도 갱신 행 0개를 성공으로 처리해(에이전트 ID가 없으면 조용히 넘어감) 같은 무음 성공 유형이 남아 있어.
+- 다음 작업: `Store::status`의 무음 성공 처리 여부 결정, 또는 "종료 중 생성·가져오기·등록 거절"을 실제 WebView에서 재현하는 검증 경로 마련.
+
 ## 종료 접수 차단을 에이전트 등록·해제와 OpenCode 모델 조회까지 확장 (2026-10-25)
 
 - 선택한 작업: 로드맵 1단계(기존 기능 안정화) 잔여 항목 "종료·큐·원본 동시 사용 실패 재현" 중 앞선 회차가 남긴 접수 차단 공백. `register_agent_instance`/`unregister_agent_instance`는 종료 중에도 `agent_instances`·`agents` 행을 쓰거나 지울 수 있었고, `list_opencode_models`는 종료 중에도 단기 OpenCode CLI 프로세스를 새로 띄울 수 있었어.
