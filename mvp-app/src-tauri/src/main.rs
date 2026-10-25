@@ -48,12 +48,19 @@ fn list_agent_instances(engine: tauri::State<'_, Arc<Engine>>) -> Result<Vec<reg
 
 #[tauri::command]
 fn register_agent_instance(provider: String, path: String, role: String, engine: tauri::State<'_, Arc<Engine>>) -> Result<registry::Instance> {
-    registry::register_instance(&engine.store, engine.admission(), &provider, &path, &role)
+    let instance = registry::register_instance(&engine.store, engine.admission(), &provider, &path, &role)?;
+    // Registration writes an `agents` row, so the open WebView needs the new
+    // snapshot instead of waiting for the next unrelated chat event.
+    engine.emit()?;
+    Ok(instance)
 }
 
 #[tauri::command]
 fn unregister_agent_instance(id: String, engine: tauri::State<'_, Arc<Engine>>) -> Result<()> {
-    registry::unregister_instance(&engine.store, engine.admission(), &id)
+    registry::unregister_instance(&engine.store, engine.admission(), &id)?;
+    // Removal deletes that row; without the emit the Agents view keeps showing
+    // the removed instance's last status until another event arrives.
+    engine.emit()
 }
 
 #[tauri::command]

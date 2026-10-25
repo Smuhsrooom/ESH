@@ -184,27 +184,37 @@ impl Store {
         let path_text = canonical.to_string_lossy().into_owned();
         let key = path_text.to_lowercase();
         let id = uuid::Uuid::new_v4().to_string();
-        let db = self.db.lock().map_err(err)?;
+        let mut db = self.db.lock().map_err(err)?;
         let exists: Option<String> = db.query_row("SELECT id FROM agent_instances WHERE provider=?1 AND path_key=?2", params![provider_id,key], |r| r.get(0)).optional().map_err(err)?;
         if exists.is_some() { return Err("이미 등록된 실행 파일입니다".into()); }
         let connection = if provider_id == "opencode" && role == "lead" && path_text.replace('\\', "/").to_lowercase().ends_with("/node_modules/opencode-ai/bin/opencode.exe") { "opencode_cli_json" } else { "not_configured" };
-        db.execute("INSERT INTO agent_instances(id,provider,name,executable_path,path_key,connection_kind,role,source,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7,'user',?8)",
+        // The instance row, its execution-status row, and the revision that makes
+        // the change visible to snapshot consumers commit together, so the WebView
+        // never sees a registration without the row that explains its status.
+        let tx = db.transaction().map_err(err)?;
+        tx.execute("INSERT INTO agent_instances(id,provider,name,executable_path,path_key,connection_kind,role,source,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7,'user',?8)",
             params![id,provider_id,name,path_text,key,connection,role,timestamp()]).map_err(err)?;
         if connection == "opencode_cli_json" {
-            db.execute("INSERT OR IGNORE INTO agents(id,status,detail,updated_at) VALUES(?1,'idle','대기 중',?2)", params![id,timestamp()]).map_err(err)?;
+            tx.execute("INSERT OR IGNORE INTO agents(id,status,detail,updated_at) VALUES(?1,'idle','대기 중',?2)", params![id,timestamp()]).map_err(err)?;
         }
+        tx.execute("UPDATE meta SET revision=revision+1", []).map_err(err)?;
+        tx.commit().map_err(err)?;
         drop(db);
         self.list_agent_instances()?.into_iter().find(|item| item.id == id).ok_or_else(|| "등록 결과를 읽을 수 없습니다".into())
     }
 
     pub fn unregister_agent_instance(&self, id: &str) -> Result<()> {
-        let db = self.db.lock().map_err(err)?;
+        let mut db = self.db.lock().map_err(err)?;
         let sessions: i64 = db.query_row("SELECT COUNT(*) FROM chat_sessions WHERE agent_instance_id=?1", [id], |r| r.get(0)).map_err(err)?;
         if sessions > 0 { return Err("이 에이전트를 사용하는 세션이 있어 등록 해제할 수 없습니다".into()); }
-        let count = db.execute("DELETE FROM agent_instances WHERE id=?1 AND source='user'", [id]).map_err(err)?;
+        // Both deletes and the revision bump are one transaction: a failure or a
+        // crash can no longer leave an `agents` row behind for a removed instance.
+        let tx = db.transaction().map_err(err)?;
+        let count = tx.execute("DELETE FROM agent_instances WHERE id=?1 AND source='user'", [id]).map_err(err)?;
         if count == 0 { return Err("등록 해제할 사용자 에이전트를 찾을 수 없습니다".into()); }
-        db.execute("DELETE FROM agents WHERE id=?1", [id]).map_err(err)?;
-        Ok(())
+        tx.execute("DELETE FROM agents WHERE id=?1", [id]).map_err(err)?;
+        tx.execute("UPDATE meta SET revision=revision+1", []).map_err(err)?;
+        tx.commit().map_err(err)
     }
 }
 
@@ -332,6 +342,33 @@ mod tests {
         assert!(store.list_agent_instances().unwrap().iter().any(|entry| entry.id == item.id));
         // The guard is not a one-off: nothing reopens admission during shutdown.
         assert!(register_instance(&store, &accepting, "claude_code", &exe.to_string_lossy(), "lead").is_err());
+    }
+
+    #[test]
+    fn registration_and_removal_are_visible_to_snapshot_consumers() {
+        // The WebView only accepts a snapshot whose revision is not older than the
+        // one it holds, so both writes must bump it and the status row must appear
+        // and disappear with the instance.
+        let temp = tempfile::tempdir().unwrap();
+        let cli = temp.path().join("node_modules/opencode-ai/bin/opencode.exe");
+        std::fs::create_dir_all(cli.parent().unwrap()).unwrap();
+        std::fs::write(&cli, b"probe only").unwrap();
+        let store = Store::open(&temp.path().join("chat.sqlite")).unwrap();
+        let before = store.snapshot().unwrap();
+        assert_eq!(before.agents.len(), 2);
+        let instance = store.register_agent_instance("opencode", &cli.to_string_lossy(), "lead").unwrap();
+        let registered = store.snapshot().unwrap();
+        assert!(registered.revision > before.revision, "{} -> {}", before.revision, registered.revision);
+        let row = registered.agents.iter().find(|agent| agent.id == instance.id).expect("registered instance row");
+        assert_eq!((row.status.as_str(), registered.agents.len()), ("idle", 3));
+        assert!(store.status(&instance.id, "running", "답변 중").unwrap());
+        store.unregister_agent_instance(&instance.id).unwrap();
+        let removed = store.snapshot().unwrap();
+        assert!(removed.revision > registered.revision, "{} -> {}", registered.revision, removed.revision);
+        assert!(removed.agents.iter().all(|agent| agent.id != instance.id));
+        assert_eq!(removed.agents.len(), 2);
+        assert!(store.list_agent_instances().unwrap().iter().all(|entry| entry.id != instance.id));
+        assert!(cli.exists());
     }
 
     #[test]
