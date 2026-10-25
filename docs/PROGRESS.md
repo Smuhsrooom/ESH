@@ -1,5 +1,19 @@
 # ESH 진행 상태와 개발 인계
 
+## 에이전트 배지 개수와 목록 불일치 정리 (2026-10-25)
+
+- 선택한 작업: 로드맵 1단계(기존 기능 안정화) 잔여 항목 중 앞선 회차가 남긴 "에이전트 등록·해제와 `agents` 행의 불일치"의 남은 절반. `main.tsx`는 `에이전트` 배지 개수를 `snapshot.agents.length`로 표시하고, `AgentsView`는 builtin 두 개와 `agent_instances`의 모든 사용자 등록을 목록에 그려. 그런데 `register_agent_instance`는 OpenCode Lead(`opencode_cli_json`)일 때만 `agents` 행을 만들었어. 그래서 Claude Code·Gemini CLI처럼 실행 연결이 없는 등록을 추가하면 목록은 3개인데 배지는 2로 남았어. 지난 회차가 "인스턴스가 없는 `agents` 행"을 지워 배지가 부풀던 문제를 고쳤으니, 이번에는 반대 방향(등록이 있는데 상태 행이 없는 경우)을 맞췄어.
+- 변경 파일: `mvp-app/src-tauri/src/registry.rs`(`register_agent_instance`가 모든 등록에 `agents` 행을 한 트랜잭션 안에서 생성, OpenCode Lead는 기존처럼 `idle`/`대기 중`, 실행 연결이 없는 등록은 `unknown`/`실행 연결이 설정되지 않았습니다`, 회귀 테스트 1개), `mvp-app/src-tauri/src/store.rs`(`Store::open`에서 `agent_instances`에 있으나 `agents` 행이 없는 인스턴스를 `INSERT OR IGNORE`로 보충. 기존 상태는 덮어쓰지 않음).
+- 동작 보존: `agents`·`agent_instances`·`chat_sessions` 스키마와 `user_version=6`, 사용자 메시지·세션·컨텍스트, `tool_deliveries`, Blocking Delegation, `request_arch_review`, archReview/latestUserRequirements 분리, 종료 순서와 접수 차단, Arch 타임아웃 120초(범위 30~600)는 변경하지 않았어. 새 DB 마이그레이션은 없어. 지난 회차의 "인스턴스 없는 `agents` 행 삭제"와 재시작 시 `unknown` 복구 갱신은 그대로야. 실행 연결이 없는 등록은 실행 상태를 주장하지 않도록 `idle`이 아니라 `unknown`으로 두고, 목록 라벨은 기존처럼 `지원` 값으로 `미지원`을 표시해.
+- 검증 (실제 출력):
+  - `npm test` → `test result: ok. 56 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.48s` (기존 55 + 신규 1, `registry::tests::every_registration_owns_one_status_row_so_badge_and_list_agree ... ok`)
+  - `node scripts/verify_external_threads.mjs` → `{"passed":true,"recordedRows":27,"scratchRowsHidden":9,"normalConversationsPreserved":true}`
+  - `npm run build` → `✓ built in 2.46s` (`dist/assets/index-B_6vxOOa.js` 433.29 kB, `index-YBSTmYxd.css` 52.24 kB, `guiProbe-djswdxyz.js` 45.64 kB)
+- 신규 테스트 내용: 등록 전 `agents` 2개 → Claude Code(미지원) 등록 후 3개이고 해당 행이 정확히 1개이며 상태가 `unknown`인지, 그 행을 지워 이전 빌드 상태를 흉내 낸 뒤 재개방하면 `Store::open`이 `unknown`/`실행 연결이 설정되지 않았습니다`로 보충하고 builtin `codex`는 `idle`을 유지하는지, 한 번 더 재개방해도 3개로 같은지(멱등), 등록 해제 후 2개로 돌아가는지를 확인해. 저장소 계층만 검사해.
+- 이번 결과는 Rust 단위·분류 회귀 검사야. 실제 Tauri WebView에서 배지 숫자가 3으로 바뀌고 목록 항목 수와 같은지는 확인하지 않았어. `python scripts/verify_*.py`와 데스크톱 빌드는 실행하지 않았어(이 worktree에는 `src-tauri/target/debug`에 실행 파일이 없어 새로 빌드해야 함).
+- 남은 문제: 원본 세션 동시 사용을 막는 전역 잠금은 여전히 없어(구조 변경이라 **승인 대기**). "종료 중 거절"을 실제 WebView에서 재현하는 검증 경로도 아직 없어. 실행 연결이 없는 등록의 `unknown` 상태는 `AgentsView` 상세에서 `상태 확인 필요`로 보이지만 이 화면 문구는 WebView에서 확인하지 않았어.
+- 다음 작업: "종료 중 거절"을 실제 WebView에서 재현하는 검증 경로 마련, 또는 원본 세션 전역 잠금 설계 승인 요청.
+
 ## 시작 시 고아 `agents` 행 정리 (2026-10-25)
 
 - 선택한 작업: 로드맵 1단계(기존 기능 안정화) 잔여 항목 중 앞선 회차가 남긴 "시작 시 고아 `agents` 행 정리". 등록 해제는 이제 인스턴스 행과 상태 행을 한 트랜잭션에서 지우지만, 그 수정 이전 빌드가 남긴 상태 행은 지울 경로가 없어 그대로 남았어. `agents`는 레지스트리에서 파생된 실행 상태이고 사용자 데이터가 아니며, 남은 행은 화면 목록에는 나타나지 않는데도 `main.tsx`의 배지 개수(`snapshot.agents.length`)만 부풀렸어.
