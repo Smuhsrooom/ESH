@@ -32,3 +32,10 @@ mvp-app/tsconfig.tsbuildinfo
 *.key
 *.p12
 *.pfx
+
+# 자동 개발 자동화 런타임 산출물 (커밋 금지)
+.automation.lock
+.routine-write-test.txt
+
+# 로컬 전용 인계 문서 (원격에 올리지 않음)
+docs/AUTOMATION_HANDOFF.md
