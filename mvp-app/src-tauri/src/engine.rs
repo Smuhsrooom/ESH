@@ -67,6 +67,36 @@ fn review_envelope(
 fn interrupt_consumed_input(store: &Store, id: &str) -> Result<bool> {
     store.interrupt_queued(id)
 }
+/// Commits a finished OpenCode turn. The local turn binding is confirmed first:
+/// when the user cancels while the CLI is answering, the message is no longer
+/// `queued`, and the turn must not move `chat_sessions.thread_id` to an external
+/// session whose answer was never stored locally. Otherwise the next turn would
+/// resume a conversation that local history cannot show. The successful path
+/// writes the same rows as before.
+fn commit_opencode_answer(
+    store: &Store,
+    session_id: &str,
+    user_id: &str,
+    answer: &crate::opencode::Answer,
+) -> Result<()> {
+    let turn = uuid::Uuid::new_v4().to_string();
+    store.confirm_turn_start(user_id, &answer.session_id, &turn)?;
+    store.bind_codex_session(session_id, &answer.session_id, &answer.session_id)?;
+    store.routed_message(
+        "opencode",
+        &answer.text,
+        false,
+        Route {
+            channel: "main",
+            kind: "answer",
+            thread_id: Some(answer.session_id.clone()),
+            turn_id: Some(turn),
+            chat_session_id: Some(session_id.to_string()),
+            ..Route::default()
+        },
+    )?;
+    Ok(())
+}
 use tauri::{AppHandle, Emitter};
 use tokio::sync::{mpsc, watch};
 
@@ -936,13 +966,7 @@ impl Engine {
             std::path::Path::new(path), &self.data_dir, saved.thread_id.as_deref(), saved.model.as_deref(), &user.content, stop.clone(),
         ).await?;
         if *stop.borrow() { return Err("OpenCode 실행 중단".into()); }
-        let turn = uuid::Uuid::new_v4().to_string();
-        self.store.bind_codex_session(&saved.id, &answer.session_id, &answer.session_id)?;
-        self.store.confirm_turn_start(&user.id, &answer.session_id, &turn)?;
-        self.store.routed_message("opencode", &answer.text, false, Route {
-            channel: "main", kind: "answer", thread_id: Some(answer.session_id),
-            turn_id: Some(turn), chat_session_id: Some(saved.id), ..Route::default()
-        })?;
+        commit_opencode_answer(&self.store, &saved.id, &user.id, &answer)?;
         self.state(id, "completed", "답변 완료")?;
         Ok(())
     }
@@ -1108,5 +1132,53 @@ mod switch_tests {
         assert!(interrupt_consumed_input(&store, &input.id).unwrap());
         assert!(store.confirm_turn_start(&input.id, "thread-b", "turn-b").is_err());
         assert_eq!(store.snapshot().unwrap().messages[0].delivery, "interrupted");
+    }
+}
+
+#[cfg(test)]
+mod opencode_commit_tests {
+    use super::commit_opencode_answer;
+    use crate::{opencode::Answer, store::Store};
+
+    fn store() -> (tempfile::TempDir, Store) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("opencode.sqlite")).unwrap();
+        (dir, store)
+    }
+
+    fn answer() -> Answer {
+        Answer { session_id: "ses_external".into(), text: "OpenCode 답변".into() }
+    }
+
+    #[test]
+    fn a_finished_turn_binds_the_external_session_and_stores_the_answer() {
+        let (_dir, store) = store();
+        let user = store.message("user", "질문", false).unwrap();
+        commit_opencode_answer(&store, "default-session", &user.id, &answer()).unwrap();
+        let session = store.session("default-session").unwrap();
+        assert_eq!(session.thread_id.as_deref(), Some("ses_external"));
+        assert_eq!(session.session_id, "ses_external");
+        let messages = store.snapshot().unwrap().messages;
+        assert_eq!(messages.len(), 2);
+        assert_eq!((messages[0].delivery.as_str(), messages[0].turn_id.is_some()), ("delivered", true));
+        assert_eq!((messages[1].speaker.as_str(), messages[1].channel.as_str()), ("opencode", "main"));
+        assert_eq!(
+            (messages[1].content.as_str(), messages[1].delivery.as_str()),
+            ("OpenCode 답변", "delivered")
+        );
+    }
+
+    #[test]
+    fn a_cancelled_turn_neither_moves_the_external_session_nor_stores_an_answer() {
+        let (_dir, store) = store();
+        let user = store.message("user", "질문", false).unwrap();
+        store.cancel_queued("default-session").unwrap();
+        assert!(commit_opencode_answer(&store, "default-session", &user.id, &answer()).is_err());
+        let session = store.session("default-session").unwrap();
+        assert_eq!(session.thread_id, None);
+        assert_eq!(session.session_id, "");
+        let messages = store.snapshot().unwrap().messages;
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].delivery, "cancelled");
     }
 }
