@@ -1,5 +1,23 @@
 # ESH 진행 상태와 개발 인계
 
+## 리뷰 요구사항 전달의 결합·전달 단일 쓰기 (2026-10-25)
+
+- 선택한 작업: 1단계(기존 기능 안정화) 잔여 항목 중 지난 회차가 남긴 "`bind_messages` 무음 성공". `engine.rs`의 리뷰 봉투 경로는 봉투를 Codex에 보낸 뒤 `bind_messages(ids, thread, turn)`로 대기 요구사항을 리뷰 턴에 묶고, **그다음** `delivery(ids, "delivered")`로 전달 완료를 표시했어. 두 문장이 서로 다른 트랜잭션이라 사이에서 실패하면(프로세스 종료·디스크 오류) 메시지는 특정 턴에 묶인 채 `delivery='queued'`로 남고, `pending_requirements`는 `queued`만 고르므로 **다음 리뷰에서 같은 요구사항을 Codex에 다시 전달**하게 돼. 게다가 `bind_messages`는 갱신 행 수를 보지 않아 없는 메시지 ID도 조용히 성공으로 처리하고 `meta.revision`만 올렸어. `tool_state`·`status`·`confirm_tool`·`bind_codex_session`에서 이미 제거한 무음 성공 유형의 남은 하나야.
+- 변경 파일:
+  - `mvp-app/src-tauri/src/store.rs` — `bind_messages`를 `deliver_requirements(ids, thread, turn)`로 대체. 빈 `thread`·`turn`을 거절하고, 전달할 요구사항이 없으면 아무것도 쓰지 않고 `Ok(())`(revision 불변). 한 트랜잭션 안에서 각 ID에 `thread_id`·`turn_id`·`delivery='delivered'`를 함께 쓰고, 갱신 행이 정확히 1이 아니면 `요구사항 메시지를 찾을 수 없습니다` 오류로 **배치 전체를 롤백**해. `meta.revision` 증가와 커밋도 같은 트랜잭션. 회귀 테스트 1개 추가.
+  - `mvp-app/src-tauri/src/engine.rs` — 봉투 전달 후 두 호출을 `deliver_requirements` 한 번으로 교체. `rpc.turn_id` 없음 검사(`Codex 턴이 없습니다`)와 `reply_to_tool_call` → 저장 → `emit` 순서는 그대로.
+  - `mvp-app/src-tauri/src/characterization_tests.rs` — 기존 3곳의 `bind_messages` + `delivery("delivered")` 조합을 `deliver_requirements` 한 번으로 교체(같은 최종 상태).
+- 동작 보존: 봉투의 키 이름·구조(`kind`, `archReview`, `latestUserRequirements{conversationVersion,messages}`, `reviewIsStale`, `processingOrder`)와 `processingOrder` 순서, `@arch` 제외 규칙, 봉투 전송 후 저장·`emit` 순서는 그대로야. Blocking Delegation(같은 RPC 호출에 결과 반환), `request_arch_review`, `archReview`/`latestUserRequirements` 구조적 분리, `tool_deliveries` 상태 전이, 종료 순서와 접수 차단, Arch 타임아웃 120초(범위 30~600), 단일 worker, DB 스키마·`user_version=6`, 사용자 메시지·세션·컨텍스트는 변경하지 않았어. 정상 경로에서 쓰는 행·값(`thread_id`/`turn_id`/`delivered`)은 이전과 같아. 달라진 것은 (1) 두 쓰기가 한 트랜잭션, (2) 없는 ID가 오류, (3) 대기 요구사항이 0건일 때 revision을 올리지 않음(이전에는 두 번 올리고 빈 `emit`을 했음) 세 가지야.
+- 검증 (실제 출력):
+  - `npm test` → `test result: ok. 63 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.49s` (기존 62 + 신규 1, `store::tests::delivering_requirements_binds_and_marks_delivered_in_one_write ... ok`)
+  - `node scripts/verify_external_threads.mjs` → `{"passed":true,"recordedRows":27,"scratchRowsHidden":9,"normalConversationsPreserved":true}`
+  - `npm run build` → `✓ built in 2.58s` (`dist/assets/index-B_6vxOOa.js` 433.29 kB, `index-YBSTmYxd.css` 52.24 kB, `guiProbe-djswdxyz.js` 45.64 kB — 프런트를 건드리지 않아 해시 동일)
+  - Rust 경고는 기존 2건(`agents.rs`의 `Authenticated`·`Required`·`Error`, `Ready` 미사용 variant)뿐이고 새 경고는 없어.
+- 신규 테스트 내용: 요구사항 2건을 한 번에 전달하면 `revision`이 **1만** 증가하고 두 메시지가 모두 `delivered` + 같은 `thread_id`/`turn_id`가 되며 `pending_requirements`가 비는지, 세 번째 요구사항과 없는 ID를 함께 넘기면 오류가 나고 **세 번째 메시지가 `queued`·`thread_id`/`turn_id` 없음으로 그대로**이며 `revision`도 변하지 않고 여전히 대기 1건으로 남는지(부분 쓰기 없음), 빈 `turn`·빈 `thread`는 거절되고 빈 배치는 `Ok`이면서 `revision`을 올리지 않는지 확인해. 저장소 계층만 검사해.
+- 이번 결과는 Rust 단위·분류 회귀 검사야. 실제 Codex App Server가 `request_arch_review`를 호출해 이 봉투를 받는 경로, 실제 WebView의 전달 상태 표시, 실제 프로세스가 두 쓰기 사이에서 죽는 상황은 확인하지 않았어. `python scripts/verify_*.py`와 데스크톱 빌드는 실행하지 않았어(변경이 Rust 백엔드이고 실행 중인 앱을 건드리지 않으려고).
+- 남은 문제: (a) 1단계 잔여 4건(GUI 실행 확인, `tauri-plugin-single-instance` 내부 경합, 원본 세션 전역 잠금=**승인 대기**, 종료 중 거절의 WebView 재현)은 그대로 차단 상태야. (b) OpenCode 턴에서 CLI가 답을 만든 뒤 확정이 실패하면 그 답변 텍스트는 여전히 저장되지 않아(중단된 턴의 답변을 남길지 여부는 UX 결정이 필요해). (c) `delivery`는 여전히 갱신 행 수를 확인하지 않는 무음 성공 함수야 — 남은 호출부는 `engine.rs`의 `@arch` 직접 질문 경로 한 곳이고 `let _ =`로 결과를 버리는 의도적 best-effort야(전달 실패해도 리뷰는 진행). 이 경로를 엄격하게 바꾸려면 `@arch` 질문이 실패했을 때 사용자에게 어떻게 보여줄지 UX 결정이 먼저 필요해.
+- 다음 작업: (b)의 답변 보존 여부 결정, 또는 `@arch` 직접 질문 경로의 `delivery` 실패 처리 방침 결정. 2단계 Mock 체크리스트는 "단일 worker 직렬성"만 `AppHandle` 의존이라 단위 검사로 닫을 수 없는 상태야.
+
 ## 외부 세션 연결의 무음 성공 제거 (2026-10-25)
 
 - 선택한 작업: 1단계(기존 기능 안정화) 잔여 항목 중 지난 회차가 남긴 "`bind_codex_session` 무음 성공". 이 함수는 `UPDATE chat_sessions SET thread_id=?,codex_session_id=? WHERE id=?`의 갱신 행 수를 보지 않고 `meta.revision`을 올린 뒤 `Ok(())`를 돌려줬어. 세션 행이 없으면 아무것도 저장되지 않았는데 호출부는 성공으로 처리했고, 반대로 정상 저장 때도 `thread_id`가 snapshot에 포함되는데 revision을 같은 트랜잭션에서 올리지 않아 두 문장 사이에 실패하면 화면이 이전 thread를 계속 보여줄 수 있었어. `tool_state`·`status`·`confirm_tool`에서 이미 제거한 무음 성공 유형의 마지막 남은 하나야.
