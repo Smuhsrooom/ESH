@@ -10,7 +10,8 @@
   - `node scripts/verify_external_threads.mjs` → `{"passed":true,"recordedRows":27,"scratchRowsHidden":9,"normalConversationsPreserved":true}`
   - `npm run build` → `✓ built in 2.84s` (`dist/assets/index-B_6vxOOa.js` 433.29 kB, `index-YBSTmYxd.css` 52.24 kB)
 - 신규 테스트 내용: 인스턴스가 있는 `inst-keep` 상태 행과 인스턴스가 없는 `inst-orphan` 상태 행을 함께 넣고 재개방하면 `agents`가 `antigravity`, `codex`, `inst-keep` 세 행만 남는지, 메시지가 새로 생기지 않는지, 한 번 더 재개방해도 결과가 같은지(멱등)를 확인해. 저장소 계층만 검사해.
-- 이번 결과는 Rust 단위·분류 회귀 검사야. 실제 Tauri WebView에서 배지 개수가 줄어드는지, 이미 고아 행이 있는 사용자 DB에서 재시작 후 화면이 어떻게 보이는지는 확인하지 않았어. `python scripts/verify_*.py`와 데스크톱 빌드는 실행하지 않았어.
+- 이번 결과는 Rust 단위·분류 회귀 검사야. 실제 Tauri WebView에서 배지 개수가 줄어드는지, 이미 고아 행이 있는 사용자 DB에서 재시작 후 화면이 어떻게 보이는지는 확인하지 않았어. `python scripts/verify_*.py`는 실행하지 않았어.
+- 데스크톱 빌드는 같은 날 사용자 요청으로 별도 실행했어 (`npm run build:desktop`) → `✓ built in 3.05s`(프런트) + `Finished \`dev\` profile [unoptimized + debuginfo] target(s) in 36.07s`, 산출물 `mvp-app/src-tauri/target/debug/esh-chat-mvp4.exe` (16,402,944 bytes, 2026-10-25 15:25). 실행 대상 이름은 `esh-chat-mvp4` 그대로야. 빌드 경고 2건(`agents.rs`의 `Authentication`·`Availability` 미사용 variant)은 이번 변경과 무관한 기존 경고야. 빌드는 컴파일 성공 증거이며 실제 WebView 동작 검증은 아니야.
 - 남은 문제: 원본 세션 동시 사용을 막는 전역 잠금은 여전히 없어. 이 항목은 실행 잠금 정책·충돌 시 동작을 정해야 하는 구조 변경이라 **승인 대기**로 두고 임의로 착수하지 않았어. "종료 중 거절"을 실제 WebView에서 재현하는 검증 경로도 아직 없어.
 - 다음 작업: "종료 중 거절"을 실제 WebView에서 재현하는 검증 경로 마련, 또는 원본 세션 전역 잠금 설계 승인 요청.
 
