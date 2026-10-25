@@ -1,9 +1,10 @@
-//! Claude Code Lead protocol skeleton.
+//! Claude Code Lead protocol skeleton and turn runner.
 //!
-//! This module defines the invocation contract and the stream-json result
-//! classification for a future `claude_code_cli` Lead adapter. Nothing here is
-//! registered or executed yet: the adapter, the session path and the Engine
-//! wiring are a later change, so the items stay unused until then.
+//! This module defines the invocation contract, the stream-json result
+//! classification and the one-process-per-turn runner for a future
+//! `claude_code_cli` Lead adapter. Nothing here is registered or wired yet: the
+//! adapter, the session path and the Engine turn branch are a later change, so
+//! the items stay unused until then.
 //!
 //! Evidence boundary:
 //! - The flags and values in `command_args` are checked against the help text
@@ -14,10 +15,26 @@
 //!   machine. A real run sends a prompt to an external API, so it needs
 //!   approval first; until then this parser is unverified protocol shape, not a
 //!   working connection.
+//! - `run` is exercised by tests against a stub child process, which proves the
+//!   process plumbing (capture, exit code, cancel, timeout) but not the real CLI.
 #![allow(dead_code)]
 
-use crate::store::Result;
+use crate::{
+    cli,
+    store::{err, Result},
+};
 use serde_json::Value;
+use std::{
+    path::Path,
+    process::Stdio,
+    time::Duration,
+};
+use tokio::{io::AsyncReadExt, process::Command, sync::watch, time::timeout};
+
+/// One turn is one process, so these bound a single answer rather than a session.
+const TURN_TIMEOUT: Duration = Duration::from_secs(180);
+const STDOUT_LIMIT: u64 = 4_194_305;
+const STDERR_LIMIT: u64 = 65_537;
 
 /// Connection kind a Claude Code registration will carry once it is wired.
 pub const CONNECTION_KIND: &str = "claude_code_cli";
@@ -47,6 +64,96 @@ pub fn command_args(existing: Option<&str>, model: Option<&str>) -> Vec<String> 
         args.push(model.into());
     }
     args
+}
+
+/// The prompt is the trailing positional argument, as the installed help
+/// declares (`Usage: claude [options] [command] [prompt]`).
+pub fn turn_args(existing: Option<&str>, model: Option<&str>, prompt: &str) -> Vec<String> {
+    let mut args = command_args(existing, model);
+    args.push(prompt.to_string());
+    args
+}
+
+/// Runs one conversation-only turn and returns the classified answer.
+///
+/// The caller keeps the saved session ID and passes it back as `existing` so the
+/// CLI resumes that conversation; a changed session ID fails the turn instead of
+/// silently starting a new conversation.
+pub async fn run(
+    path: &Path,
+    work_dir: &Path,
+    existing: Option<&str>,
+    model: Option<&str>,
+    prompt: &str,
+    stop: watch::Receiver<bool>,
+) -> Result<Answer> {
+    if !path.is_file() {
+        return Err("등록된 Claude Code CLI를 찾을 수 없습니다".into());
+    }
+    if prompt.trim().is_empty() {
+        return Err("Claude Code에 보낼 요청이 비어 있습니다".into());
+    }
+    let mut command = Command::new(path);
+    cli::hidden(&mut command);
+    command
+        .current_dir(work_dir)
+        .args(turn_args(existing, model, prompt))
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    collect(command, existing, stop, TURN_TIMEOUT).await
+}
+
+/// Waits for the child while capturing both pipes.
+///
+/// Cancel and timeout kill the whole tree before returning, so a stopped turn
+/// cannot leave an orphan process behind. stderr is read only to detect the size
+/// limit and is never shown or logged: it can carry internal context.
+async fn collect(
+    mut command: Command,
+    expected: Option<&str>,
+    mut stop: watch::Receiver<bool>,
+    limit: Duration,
+) -> Result<Answer> {
+    let mut child = command.spawn().map_err(|e| format!("Claude Code 시작 실패: {e}"))?;
+    let stdout = child.stdout.take().ok_or("Claude Code stdout이 없습니다")?;
+    let stderr = child.stderr.take().ok_or("Claude Code stderr가 없습니다")?;
+    let out = tokio::spawn(async move {
+        let mut bytes = Vec::new();
+        stdout.take(STDOUT_LIMIT).read_to_end(&mut bytes).await.map_err(err)?;
+        Ok::<Vec<u8>, String>(bytes)
+    });
+    let err_out = tokio::spawn(async move {
+        let mut bytes = Vec::new();
+        stderr.take(STDERR_LIMIT).read_to_end(&mut bytes).await.map_err(err)?;
+        Ok::<Vec<u8>, String>(bytes)
+    });
+    let status = tokio::select! {
+        _ = stop.changed() => {
+            cli::stop_tree(&mut child).await?;
+            return Err("Claude Code 실행 중단".into());
+        },
+        result = timeout(limit, child.wait()) => match result {
+            Ok(value) => value.map_err(err)?,
+            Err(_) => {
+                cli::stop_tree(&mut child).await?;
+                return Err("Claude Code 응답 시간 초과".into());
+            }
+        },
+    };
+    let output = out.await.map_err(err)??;
+    let errors = err_out.await.map_err(err)??;
+    if output.len() as u64 >= STDOUT_LIMIT || errors.len() as u64 >= STDERR_LIMIT {
+        return Err("Claude Code 출력 크기 제한을 초과했습니다".into());
+    }
+    if !status.success() {
+        return Err(format!(
+            "Claude Code가 종료 코드 {:?}로 실패했습니다. CLI 로그를 확인해 주세요",
+            status.code()
+        ));
+    }
+    parse_events(&output, expected)
 }
 
 /// Classify one turn's stream-json output.
@@ -230,5 +337,100 @@ mod tests {
         ]
         .join("\r\n");
         assert_eq!(parse_events(output.as_bytes(), None).unwrap().text, "ok");
+    }
+
+    #[test]
+    fn the_prompt_is_the_trailing_positional_argument() {
+        let args = turn_args(Some(SESSION), Some("claude-sonnet-4-5"), "안녕하세요");
+        let expected = command_args(Some(SESSION), Some("claude-sonnet-4-5"));
+        assert_eq!(args.len(), expected.len() + 1);
+        assert_eq!(&args[..expected.len()], expected.as_slice());
+        assert_eq!(args.last().unwrap(), "안녕하세요");
+        // The prompt stays a positional argument, never a flag value, so a prompt
+        // that looks like a flag cannot change the invocation.
+        assert!(!args[..expected.len()].iter().any(|arg| arg == "안녕하세요"));
+    }
+
+    /// A stub child process is enough to inspect the real spawn/capture path
+    /// without calling any model. It only proves the plumbing.
+    #[cfg(windows)]
+    fn stub(script: &str) -> Command {
+        let mut command = Command::new("powershell.exe");
+        command
+            .args(["-NoProfile", "-NonInteractive", "-Command", script])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        command
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_stub_stream_is_captured_and_classified_through_the_real_process_path() {
+        let script = format!(
+            "[Console]::WriteLine('{{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"{SESSION}\"}}');\
+             [Console]::WriteLine('{{\"type\":\"assistant\",\"session_id\":\"{SESSION}\",\"message\":{{\"content\":[{{\"type\":\"text\",\"text\":\"draft\"}}]}}}}');\
+             [Console]::WriteLine('{{\"type\":\"result\",\"is_error\":false,\"session_id\":\"{SESSION}\",\"result\":\"stub answer\"}}')"
+        );
+        let (_stop, stopped) = watch::channel(false);
+        let answer = collect(stub(&script), None, stopped, Duration::from_secs(60)).await.unwrap();
+        assert_eq!(answer, Answer { session_id: SESSION.into(), text: "stub answer".into() });
+        // The same output fails when the saved session is not the one that answered.
+        let (_stop, stopped) = watch::channel(false);
+        let mismatch = collect(
+            stub(&script),
+            Some("22222222-2222-4222-8222-222222222222"),
+            stopped,
+            Duration::from_secs(60),
+        )
+        .await
+        .unwrap_err();
+        assert!(mismatch.contains("세션 ID가 일치하지 않습니다"), "{mismatch}");
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_failed_exit_reports_the_code_without_leaking_stderr() {
+        let (_stop, stopped) = watch::channel(false);
+        let message = collect(
+            stub("[Console]::Error.WriteLine('secret-context-value'); exit 3"),
+            None,
+            stopped,
+            Duration::from_secs(60),
+        )
+        .await
+        .unwrap_err();
+        assert!(message.contains("종료 코드"), "{message}");
+        assert!(message.contains('3'), "{message}");
+        // stderr can carry internal context, so it must not reach the caller.
+        assert!(!message.contains("secret-context-value"), "{message}");
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_cancelled_or_slow_turn_stops_the_child_instead_of_waiting() {
+        let script = "[Console]::WriteLine('{\"type\":\"system\"}'); Start-Sleep -Seconds 30";
+        let (stop, stopped) = watch::channel(false);
+        stop.send(true).unwrap();
+        let cancelled = collect(stub(script), None, stopped, Duration::from_secs(60)).await.unwrap_err();
+        assert!(cancelled.contains("중단"), "{cancelled}");
+        let (_stop, stopped) = watch::channel(false);
+        let expired = collect(stub(script), None, stopped, Duration::from_millis(200)).await.unwrap_err();
+        assert!(expired.contains("시간 초과"), "{expired}");
+    }
+
+    #[tokio::test]
+    async fn a_missing_cli_or_an_empty_request_fails_before_any_process_starts() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_stop, stopped) = watch::channel(false);
+        let missing = run(&dir.path().join("claude.exe"), dir.path(), None, None, "질문", stopped).await.unwrap_err();
+        assert!(missing.contains("찾을 수 없습니다"), "{missing}");
+        // The placeholder file is never executed: the empty request is refused first.
+        let placeholder = dir.path().join("claude.exe");
+        std::fs::write(&placeholder, b"do not execute").unwrap();
+        let (_stop, stopped) = watch::channel(false);
+        let empty = run(&placeholder, dir.path(), None, None, "   ", stopped).await.unwrap_err();
+        assert!(empty.contains("비어 있습니다"), "{empty}");
     }
 }
