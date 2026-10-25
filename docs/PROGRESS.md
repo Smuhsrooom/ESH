@@ -1,5 +1,19 @@
 # ESH 진행 상태와 개발 인계
 
+## 시작 시 고아 `agents` 행 정리 (2026-10-25)
+
+- 선택한 작업: 로드맵 1단계(기존 기능 안정화) 잔여 항목 중 앞선 회차가 남긴 "시작 시 고아 `agents` 행 정리". 등록 해제는 이제 인스턴스 행과 상태 행을 한 트랜잭션에서 지우지만, 그 수정 이전 빌드가 남긴 상태 행은 지울 경로가 없어 그대로 남았어. `agents`는 레지스트리에서 파생된 실행 상태이고 사용자 데이터가 아니며, 남은 행은 화면 목록에는 나타나지 않는데도 `main.tsx`의 배지 개수(`snapshot.agents.length`)만 부풀렸어.
+- 변경 파일: `mvp-app/src-tauri/src/store.rs`(`Store::open`에서 `agent_instances`에 없는 `agents` 행 삭제, `codex`·`antigravity` 고정 행은 예외, 회귀 테스트 1개).
+- 동작 보존: `agents`·`agent_instances`·`chat_sessions` 스키마와 사용자 메시지·세션·컨텍스트, `tool_deliveries`, Blocking Delegation, `request_arch_review`, archReview/latestUserRequirements 분리, 종료 순서와 접수 차단, Arch 타임아웃 120초(범위 30~600)는 변경하지 않았어. 새 DB 마이그레이션은 없고 `user_version`도 그대로야. 삭제 대상은 "인스턴스가 이미 없는 실행 상태 행"뿐이라 등록된 인스턴스와 builtin 두 행은 유지돼. 정리 후에도 기존 `unknown` 복구 갱신과 `revision` 증가는 그대로 수행돼.
+- 검증 (실제 출력):
+  - `npm test` → `test result: ok. 55 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.68s` (기존 54 + 신규 1, `store::tests::open_drops_status_rows_whose_instance_is_gone ... ok`)
+  - `node scripts/verify_external_threads.mjs` → `{"passed":true,"recordedRows":27,"scratchRowsHidden":9,"normalConversationsPreserved":true}`
+  - `npm run build` → `✓ built in 2.84s` (`dist/assets/index-B_6vxOOa.js` 433.29 kB, `index-YBSTmYxd.css` 52.24 kB)
+- 신규 테스트 내용: 인스턴스가 있는 `inst-keep` 상태 행과 인스턴스가 없는 `inst-orphan` 상태 행을 함께 넣고 재개방하면 `agents`가 `antigravity`, `codex`, `inst-keep` 세 행만 남는지, 메시지가 새로 생기지 않는지, 한 번 더 재개방해도 결과가 같은지(멱등)를 확인해. 저장소 계층만 검사해.
+- 이번 결과는 Rust 단위·분류 회귀 검사야. 실제 Tauri WebView에서 배지 개수가 줄어드는지, 이미 고아 행이 있는 사용자 DB에서 재시작 후 화면이 어떻게 보이는지는 확인하지 않았어. `python scripts/verify_*.py`와 데스크톱 빌드는 실행하지 않았어.
+- 남은 문제: 원본 세션 동시 사용을 막는 전역 잠금은 여전히 없어. 이 항목은 실행 잠금 정책·충돌 시 동작을 정해야 하는 구조 변경이라 **승인 대기**로 두고 임의로 착수하지 않았어. "종료 중 거절"을 실제 WebView에서 재현하는 검증 경로도 아직 없어.
+- 다음 작업: "종료 중 거절"을 실제 WebView에서 재현하는 검증 경로 마련, 또는 원본 세션 전역 잠금 설계 승인 요청.
+
 ## 등록·해제 결과의 snapshot 반영 (2026-10-25)
 
 - 선택한 작업: 로드맵 1단계(기존 기능 안정화) 잔여 항목 중 앞선 회차가 남긴 "등록 해제 시 `agents` 행 정리" 확인. 정리 자체는 `registry.rs`의 `unregister_agent_instance`가 이미 `DELETE FROM agents`로 수행하고 있었지만, 그 삭제가 `agent_instances` 삭제와 별개 문장이라 두 번째 삭제가 실패하거나 그 사이에 프로세스가 죽으면 인스턴스 없는 `agents` 행이 남았어. 게다가 두 store 함수 모두 `meta.revision`을 올리지 않고 Tauri 명령도 `emit()`을 호출하지 않아, 열려 있는 WebView는 삭제된 인스턴스의 상태와 `에이전트` 배지 개수를 다음 무관한 이벤트까지 계속 보여줬어(`main.tsx`의 `snapshot.agents.length`, `AgentsView.tsx`의 `snapshot.agents.find`).
