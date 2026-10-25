@@ -1,5 +1,22 @@
 # ESH 진행 상태와 개발 인계
 
+## 1단계 자동화 가능 항목 완료 확인과 잔여 항목 차단 상태 (2026-10-25)
+
+- 선택한 작업: 로드맵 1단계(기존 기능 안정화)의 자동화 환경에서 완결 가능한 항목이 모두 끝났는지 현재 트리를 재확인. 1~9회차까지 종료 접수 차단 확장, 무음 성공 제거(`tool_state`/`status`/`confirm_tool`), 등록·해제 snapshot 반영, 고아 `agents` 행 정리, 배지·목록 불일치, 리뷰 응답 봉투의 요구사항 단일 읽기까지 단위 검증 가능한 결함을 모두 고쳤음. 이번 회차는 코드를 더 안 고치고 세 가지 검증 명령으로 기준선을 다시 돌림(이전 실행이 중단된 뒤 시간이 흘러 재확인 가치가 있음).
+- 변경 파일: 없음(코드 변경 없음). `docs/PROGRESS.md` 항목만 추가.
+- 검증 (실제 출력):
+  - `npm test` → `test result: ok. 58 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.69s`
+  - `node scripts/verify_external_threads.mjs` → `{"passed":true,"recordedRows":27,"scratchRowsHidden":9,"normalConversationsPreserved":true}`
+  - `npm run build` → `✓ built in 3.15s` (`dist/assets/index-B_6vxOOa.js` 433.29 kB, `index-YBSTmYxd.css` 52.24 kB, `guiProbe-djswdxyz.js` 45.64 kB)
+- 이번 결과는 1~9회차가 쌓은 단위·분류 회귀의 재통과야. 신규 코드 없이 기준선만 확인했으므로 새 동작 증거는 없어.
+- 1단계 잔여 항목 4건은 모두 이 자동화 환경에서 완결 불가라 차단 상태로 둠:
+  1. **GUI 실행 확인**(중복 실행 시 기존 창 전환·정상 종료 후 `msedgewebview2` 잔존 여부) — 이 환경의 WebView2 초기화 실패로 창이 뜨지 않아 증거 생성 불가. → 사용자 실제 환경에서 확인 필요.
+  2. **플러그인 내부 경합**(`tauri-plugin-single-instance` 2.5.4의 `FindWindowW` 경합) — 플러그인 내부 한계. → 별도 IPC 보강은 요구사항(플러그인 사용)과 충돌해 미착수.
+  3. **원본 세션 전역 잠금**(동시 사용 차단) — 구조 변경 + DB 스키마 변경 후보. → 안전 정책상 **승인 대기**, 임의 착수 안 함.
+  4. **"종료 중 거절"의 실제 WebView 재현 경로** — WebView2 초기화 실패로 증거 생성 불가(직전 회차 시도 후 전부 revert). → 사용자 환경 확인 필요.
+- 앞 단계(1단계)가 완전히 검증되지 않아 2단계(Mock Agent 검증)로 넘어가지 않음. 단 Mock Agent 자체는 이미 `#[cfg(test)]`로 8개 계약 테스트를 갖추고 `npm test`에 포함돼 있어 추가 검증 공백은 아님.
+- 다음 작업: 위 4건 중 사용자가 (a) 실제 GUI 환경에서 1·4번을 확인하거나, (b) 전역 잠금 설계를 승인하면 해당 항목을 착수. 승인·환경 없이는 1단계에서 무리하게 진행할 코드 변경은 없음.
+
 ## 리뷰 응답 봉투의 요구사항 버전·목록 단일 읽기 (2026-10-25)
 
 - 선택한 작업: 로드맵 1단계(기존 기능 안정화) 잔여 항목 중 Blocking Delegation 응답 봉투의 최신 요구사항 정합성. `engine.rs`는 `latestUserRequirements.messages`를 `store.snapshot()`에서 뽑고, `latestUserRequirements.conversationVersion`과 `reviewIsStale`을 각각 **다른** `session_version()` 호출로 읽었어. 사용자 입력은 Tauri command 스레드에서 별도로 커밋되므로 그 사이에 새 메시지가 들어오면 봉투의 두 절반이 서로 다른 대화 버전을 가리킬 수 있었어(버전 N+1인데 `messages`가 비어 있거나, 반대로 `messages`에 들어간 요구사항이 `reviewIsStale` 계산에 반영되지 않음). `archReview`와 `latestUserRequirements`를 구조적으로 분리하고 `reviewIsStale`을 보존한다는 계약을 코드 한 곳에서 보장하도록 고쳤어.
