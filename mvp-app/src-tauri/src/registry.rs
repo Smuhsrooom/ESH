@@ -537,6 +537,30 @@ mod tests {
     }
 
     #[test]
+    fn a_backfilled_status_row_keeps_the_connection_the_registration_earned() {
+        // Registration reports `idle` for a connection it actually claimed. The
+        // reopen backfill used to decide that from a hardcoded OpenCode check,
+        // so a supported Claude registration whose status row was missing came
+        // back as `unknown`/`실행 연결이 설정되지 않았습니다` — the same
+        // "supported but shown as not configured" contradiction the registration
+        // path avoids. Both paths must read the same rule.
+        let temp = tempfile::tempdir().unwrap();
+        let exe = temp.path().join(".local/bin/claude.exe");
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        std::fs::write(&exe, b"probe only").unwrap();
+        let path = temp.path().join("chat.sqlite");
+        let store = Store::open(&path).unwrap();
+        let item = store.register_agent_instance("claude_code", &exe.to_string_lossy(), "lead").unwrap();
+        assert_eq!(item.connection.as_str(), crate::claude::CONNECTION_KIND);
+        // Simulate a row that an earlier build never wrote.
+        store.db.lock().unwrap().execute("DELETE FROM agents WHERE id=?1", [&item.id]).unwrap();
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        let row = reopened.snapshot().unwrap().agents.into_iter().find(|a| a.id == item.id).unwrap();
+        assert_eq!((row.status.as_str(), row.detail.as_str()), ("idle", "대기 중"));
+    }
+
+    #[test]
     fn v5_opencode_registration_migrates_without_losing_chat() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("chat.sqlite");

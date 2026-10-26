@@ -142,11 +142,18 @@ impl Store {
         // agents than the view showed. Backfill only the missing rows: existing
         // statuses are never overwritten, and an instance without an execution
         // connection stays `unknown` instead of claiming to be idle.
+        //
+        // The rule is the registration's, not a list of connection names:
+        // `registry::register_agent_instance` reports `idle` for every
+        // `connection_kind` it actually claimed and `unknown` only for
+        // `not_configured`. Naming one connection here instead made a supported
+        // Claude registration come back as "실행 연결이 설정되지 않았습니다" after a
+        // reopen, so the two paths must read the same predicate.
         db.execute(
             "INSERT OR IGNORE INTO agents(id,status,detail,updated_at)
              SELECT id,
-                    CASE WHEN connection_kind='opencode_cli_json' THEN 'idle' ELSE 'unknown' END,
-                    CASE WHEN connection_kind='opencode_cli_json' THEN '대기 중' ELSE '실행 연결이 설정되지 않았습니다' END,
+                    CASE WHEN connection_kind='not_configured' THEN 'unknown' ELSE 'idle' END,
+                    CASE WHEN connection_kind='not_configured' THEN '실행 연결이 설정되지 않았습니다' ELSE '대기 중' END,
                     created_at
              FROM agent_instances",
             [],
