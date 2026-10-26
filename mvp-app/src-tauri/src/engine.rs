@@ -1,8 +1,8 @@
 use crate::{
     agents::{registered, AgentRole, CodexLeadSession, LeadAdapter, LeadSession, ReviewAdapter, ANTIGRAVITY, CODEX},
-    store::{err, ActiveRunSnapshot, Message, Result, Route, Snapshot, Store},
+    store::{err, ActiveRunSnapshot, Message, Result, Route, Session, Snapshot, Store},
 };
-use serde_json::json;
+use serde_json::{json, Value};
 use crate::models::{CodexModel, ModelSettings};
 use std::{
     future::Future,
@@ -36,8 +36,148 @@ where
     }
     Ok(())
 }
+/// Admission control for work that outlives the current call: worker jobs,
+/// SQLite writes that shutdown later checkpoints, and short-lived CLI processes.
+/// `shutdown` closes this before it stops the worker, so every command that
+/// starts new work has to ask first instead of relying on `submit` alone.
+pub(crate) fn ensure_accepting(accepting: &AtomicBool) -> Result<()> {
+    if accepting.load(Ordering::SeqCst) {
+        Ok(())
+    } else {
+        Err("앱을 종료 중이어서 새 작업을 받을 수 없습니다".into())
+    }
+}
+/// Execution branch that owns one message. `None` means ESH has no branch for
+/// the pair, so the caller has to refuse it instead of letting `worker` fall
+/// through to Codex.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TurnRoute {
+    Codex,
+    OpenCode,
+    Claude,
+    Arch,
+}
+
+/// Which branch may answer this message. A session only ever talks to the agent
+/// it is bound to; a Codex session additionally owns the Arch question channel,
+/// which is a delegated review rather than a second lead.
+///
+/// This is an allowlist on purpose. `worker` dispatches on the route it returns
+/// instead of on the target string, so a provider without a branch of its own
+/// can never be answered by the Codex branch and stored as if the session's own
+/// agent had replied.
+fn turn_route(session: &Session, target: &str) -> Option<TurnRoute> {
+    match session.provider.as_str() {
+        "codex" => match target {
+            "codex" => Some(TurnRoute::Codex),
+            "antigravity" => Some(TurnRoute::Arch),
+            _ => None,
+        },
+        "opencode" => (target == "opencode").then_some(TurnRoute::OpenCode),
+        // Claude Code answers its own sessions only. A session can only be
+        // created from a registration the adapter claims, and `submit` only
+        // accepts the `claude_code` target because that adapter is registered,
+        // so this branch stays unreachable for every other provider.
+        "claude_code" => (target == "claude_code").then_some(TurnRoute::Claude),
+        _ => None,
+    }
+}
+
+/// Manual compaction is a Codex thread operation. An OpenCode session keeps its
+/// own CLI session id in `thread_id`, so passing that value to Codex compaction
+/// would compact a thread that does not exist and leave the session waiting on a
+/// compaction that can never finish.
+fn compact_thread(session: &Session) -> Result<&str> {
+    if session.provider != "codex" {
+        return Err("Codex 세션이 아니어서 컨텍스트를 압축할 수 없습니다".into());
+    }
+    session.thread_id.as_deref().ok_or_else(|| {
+        "이 세션은 아직 Codex 스레드가 없습니다. 먼저 메시지를 한 번 보내 주세요.".to_string()
+    })
+}
+
+/// Builds the Blocking Delegation payload that goes back on the original open
+/// tool call. `archReview` and `latestUserRequirements` stay separate keys so
+/// Codex can apply the user's newest requirements first, and `reviewIsStale`
+/// compares the version captured when the review started with the version the
+/// delivered requirements belong to. Both versions come from one store read, so
+/// the flag can never disagree with the `messages` list next to it.
+fn review_envelope(
+    review: Value,
+    review_version: i64,
+    requirements_version: i64,
+    pending: Vec<Message>,
+) -> Value {
+    json!({"kind":"arch_review_delivery","archReview":review,
+        "latestUserRequirements":{"conversationVersion":requirements_version,"messages":pending},
+        "reviewIsStale":review_version!=requirements_version,
+        "processingOrder":["latestUserRequirements","archReview"]})
+}
 fn interrupt_consumed_input(store: &Store, id: &str) -> Result<bool> {
     store.interrupt_queued(id)
+}
+/// Commits a finished turn of a one-process-per-turn CLI lead (OpenCode, Claude
+/// Code). The local turn binding is confirmed first: when the user cancels while
+/// the CLI is answering, the message is no longer `queued`, and the turn must not
+/// move `chat_sessions.thread_id` to an external session whose answer was never
+/// stored locally. Otherwise the next turn would resume a conversation that local
+/// history cannot show. The successful path writes the same rows as before.
+///
+/// `speaker` is the stored author of the answer, so the two CLIs share the
+/// ordering rule without sharing an answer type.
+fn commit_lead_answer(
+    store: &Store,
+    speaker: &str,
+    session_id: &str,
+    user_id: &str,
+    external: &str,
+    text: &str,
+) -> Result<()> {
+    let turn = uuid::Uuid::new_v4().to_string();
+    store.confirm_turn_start(user_id, external, &turn)?;
+    store.bind_codex_session(session_id, external, external)?;
+    store.routed_message(
+        speaker,
+        text,
+        false,
+        Route {
+            channel: "main",
+            kind: "answer",
+            thread_id: Some(external.to_string()),
+            turn_id: Some(turn),
+            chat_session_id: Some(session_id.to_string()),
+            ..Route::default()
+        },
+    )?;
+    Ok(())
+}
+
+/// Resolves the registered Claude Code CLI that owns this session.
+///
+/// The check reads `active_role`, not the stored `role`: the adapter now
+/// advertises the connection, so a registration only reaches `lead` here when
+/// its executable is at the layout the invocation contract was written for and
+/// the adapter claims it. A registration stored elsewhere keeps
+/// `connection_kind = not_configured`, so it can neither own a session nor be
+/// answered by this branch — the same rule the OpenCode turn already follows.
+fn claude_runner(store: &Store, session: &Session) -> Result<(String, PathBuf)> {
+    if session.provider != "claude_code" {
+        return Err("Claude Code 세션이 아닙니다".into());
+    }
+    let id = session
+        .agent_instance_id
+        .as_deref()
+        .ok_or("Claude Code 등록 ID가 없습니다")?;
+    let instance = store
+        .list_agent_instances()?
+        .into_iter()
+        .find(|i| i.id == id)
+        .ok_or("Claude Code 등록을 찾을 수 없습니다")?;
+    if instance.active_role != Some("lead") || instance.installation != "installed" {
+        return Err("등록된 Claude Code CLI가 실행 가능하지 않습니다".into());
+    }
+    let path = instance.path.ok_or("Claude Code 실행 파일 경로가 없습니다")?;
+    Ok((id.to_string(), PathBuf::from(path)))
 }
 use tauri::{AppHandle, Emitter};
 use tokio::sync::{mpsc, watch};
@@ -64,6 +204,49 @@ fn matches_compaction_item(event: &serde_json::Value, thread: &str, turn: &str, 
         && event["params"]["item"]["type"] == "contextCompaction"
         && id.is_some()
         && (item.is_none() && method == "item/started" || item == id)
+}
+/// Applies one Codex event to the public-answer drafts and reports whether the
+/// stored conversation changed, so the caller emits exactly once when it did.
+/// Thread and turn have to match the running turn: a late event from a finished
+/// turn is dropped instead of being written into the current answer, and only
+/// `agentMessage` items reach the drafts (tool calls and compaction stay out).
+pub(crate) fn apply_stream_event(
+    streams: &mut crate::stream::Streams,
+    store: &Store,
+    event: &Value,
+    thread: &str,
+    turn: &str,
+    session: &str,
+) -> Result<bool> {
+    let p = &event["params"];
+    if p["threadId"] != thread || p["turnId"] != turn {
+        return Ok(false);
+    }
+    match event["method"].as_str().unwrap_or_default() {
+        "item/started" if p["item"]["type"] == "agentMessage" => {
+            if let Some(id) = p["item"]["id"].as_str() {
+                streams.start(id, p["item"]["phase"].as_str(), thread, turn, session);
+            }
+            Ok(false)
+        }
+        "item/agentMessage/delta" => match (p["itemId"].as_str(), p["delta"].as_str()) {
+            (Some(id), Some(delta)) => streams.delta(store, id, delta),
+            _ => Ok(false),
+        },
+        "item/completed" if p["item"]["type"] == "agentMessage" => match p["item"]["id"].as_str() {
+            Some(id) => streams.complete(
+                store,
+                id,
+                p["item"]["text"].as_str().unwrap_or_default(),
+                p["item"]["phase"].as_str(),
+                thread,
+                turn,
+                session,
+            ),
+            None => Ok(false),
+        },
+        _ => Ok(false),
+    }
 }
 struct ActiveRun {
     snapshot: ActiveRunSnapshot,
@@ -119,6 +302,16 @@ impl Engine {
         snapshot.active_run = self.active.lock().map_err(err)?.as_ref().map(|r| r.snapshot.clone());
         Ok(snapshot)
     }
+    /// Shared by every Tauri command that starts new work (worker turn,
+    /// compaction, session/room creation, external list/import, CLI process).
+    pub fn ensure_accepting(&self) -> Result<()> {
+        ensure_accepting(&self.accepting)
+    }
+    /// Lets command wrappers hand the admission flag to helpers that only need
+    /// the flag and the store, so the guard order stays testable.
+    pub fn admission(&self) -> &AtomicBool {
+        &self.accepting
+    }
     pub fn cancel(&self, session_id: &str, run_id: &str) -> Result<Snapshot> {
         let mut active = self.active.lock().map_err(err)?;
         let run = active.as_mut().ok_or("이미 실행이 끝났습니다")?;
@@ -130,7 +323,9 @@ impl Engine {
             self.store.audit("cancel_requested", json!({"runId":run_id,"sessionId":session_id}))?;
             run.snapshot.cancelling = true;
             let agent = self.store.session(session_id)?.agent_instance_id.unwrap_or("codex".into());
-            self.store.status(&agent, "cancelling", "현재 실행을 중단하는 중")?;
+            if !self.store.status(&agent, "cancelling", "현재 실행을 중단하는 중")? {
+                let _ = self.store.audit("agent_status_unmatched", json!({"agent":agent,"status":"cancelling"}));
+            }
             let _ = run.stop.send(true);
         }
         drop(active);
@@ -177,7 +372,13 @@ impl Engine {
         self.snapshot()
     }
     fn state(&self, agent: &str, status: &str, detail: &str) -> Result<()> {
-        self.store.status(agent, status, detail)?;
+        if !self.store.status(agent, status, detail)? {
+            // A session can still point at an instance that was unregistered
+            // while it was running. Keep the turn alive but leave a trace
+            // instead of reporting a status that was never stored.
+            self.store
+                .audit("agent_status_unmatched", json!({"agent":agent,"status":status}))?;
+        }
         self.emit()
     }
     fn error(&self, agent: &str, e: &str) -> Result<()> {
@@ -231,7 +432,7 @@ impl Engine {
         };
         let local_id = session_id.unwrap_or("default-session".into());
         let saved = self.store.session(&local_id)?;
-        if (saved.provider == "opencode" && target != "opencode") || (saved.provider == "codex" && target == "opencode") {
+        if turn_route(&saved, &target).is_none() {
             return Err("이 세션의 에이전트와 메시지 대상이 다릅니다".into());
         }
         let settings = ModelSettings { model: saved.model, reasoning_effort: saved.reasoning_effort };
@@ -272,7 +473,7 @@ impl Engine {
         }
         let session = snapshot.sessions.iter().find(|s| s.id == session_id)
             .ok_or("압축할 세션을 찾을 수 없습니다")?;
-        let thread = session.thread_id.as_deref().ok_or("이 세션은 아직 Codex 스레드가 없습니다. 먼저 메시지를 한 번 보내 주세요.")?;
+        let thread = compact_thread(session)?;
         if snapshot.contexts.iter().any(|c| c.compaction == "compacting") {
             return Err("이미 컨텍스트를 압축하는 중입니다".into());
         }
@@ -351,8 +552,11 @@ impl Engine {
                 let _ = self.emit();
                 continue;
             }
-            let agent_key = self.store.session(&input.message.chat_session_id).ok()
-                .and_then(|s| s.agent_instance_id).unwrap_or("codex".into());
+            let saved = self.store.session(&input.message.chat_session_id).ok();
+            let agent_key = saved.as_ref().and_then(|s| s.agent_instance_id.clone()).unwrap_or("codex".into());
+            // Dispatch on the allowlisted route, never on the target string, so a
+            // provider with no branch of its own cannot reach the Codex branch.
+            let route = saved.as_ref().and_then(|s| turn_route(s, &input.target));
             let (run_stop, run_stopped) = watch::channel(false);
             let run_id = uuid::Uuid::new_v4().to_string();
             *self.active.lock().unwrap() = Some(ActiveRun {
@@ -378,7 +582,7 @@ impl Engine {
                 Err(e)
             } else if *run_stopped.borrow() {
                 Err("실행 중단".into())
-            } else if input.target == "antigravity" {
+            } else if route == Some(TurnRoute::Arch) {
                 let _ = self.state("antigravity", "arch_running", "질문에 답하는 중");
                 let _ = self
                     .store
@@ -400,12 +604,18 @@ impl Engine {
                     }
                     Err(e) => Err(e),
                 }
-            } else if input.target == "opencode" {
+            } else if route == Some(TurnRoute::OpenCode) {
                 self.opencode_turn(&input.message, run_stopped.clone()).await
-            } else {
+            } else if route == Some(TurnRoute::Claude) {
+                self.claude_turn(&input.message, run_stopped.clone()).await
+            } else if route == Some(TurnRoute::Codex) {
                 let result = self.codex_turn(&mut rpc, &input.message, &input.settings, run_stopped.clone()).await;
                 if rpc.is_some() { rpc_owner = Some(input.message.chat_session_id.clone()); }
                 result
+            } else {
+                // `submit` already refuses an unroutable pair, so this only guards
+                // an input queued before the session's provider changed.
+                Err("이 세션의 에이전트와 메시지 대상이 다릅니다".into())
             };
             if self.streams.lock().unwrap().interrupt(&self.store).unwrap_or(0) > 0 { let _ = self.emit(); }
             if *stop.borrow() { break; }
@@ -440,8 +650,19 @@ impl Engine {
                 // Keep it in SQLite as a recoverable, non-replayed input.
                 let _ = interrupt_consumed_input(&self.store, &input.message.id);
                 if e.contains("연결 정리 확인 불가 (unknown)") { connection_uncertain = true; }
-                let _ = self.error(if connection_uncertain { "codex" } else if input.target == "opencode" { &agent_key } else { &input.target }, &e);
-                if input.target == "codex" {
+                // A CLI lead's status row is keyed by its registration id, not by
+                // the provider name, so the failing agent has to follow the route.
+                let error_agent = if connection_uncertain {
+                    "codex".to_string()
+                } else {
+                    match route {
+                        Some(TurnRoute::Arch) => "antigravity".to_string(),
+                        Some(TurnRoute::OpenCode) | Some(TurnRoute::Claude) => agent_key.clone(),
+                        _ => input.target.clone(),
+                    }
+                };
+                let _ = self.error(&error_agent, &e);
+                if route == Some(TurnRoute::Codex) {
                     if let Some(mut old) = rpc.take() {
                         if let Err(close_error) = LeadSession::close(&mut old).await {
                             connection_uncertain = true;
@@ -698,37 +919,19 @@ impl Engine {
             let method = event["method"].as_str().unwrap_or_default();
             if crate::context::is_event(&event) { self.emit()?; }
             match method {
-                "item/started" => {
-                    let p = &event["params"];
-                    if p["threadId"] == rpc.thread_id && p["turnId"] == json!(rpc.turn_id) && p["item"]["type"] == "agentMessage" {
-                        if let Some(id) = p["item"]["id"].as_str() {
-                            self.streams.lock().map_err(err)?.start(id, p["item"]["phase"].as_str(), &rpc.thread_id, rpc.turn_id.as_deref().unwrap(), &user.chat_session_id);
-                        }
-                    }
-                }
-                "item/agentMessage/delta" => {
-                    let p = &event["params"];
-                    if p["threadId"] == rpc.thread_id && p["turnId"] == json!(rpc.turn_id) {
-                        if let (Some(id),Some(delta)) = (p["itemId"].as_str(),p["delta"].as_str()) {
-                            let changed = self.streams.lock().map_err(err)?.delta(&self.store,id,delta)?;
-                            if changed { self.emit()?; }
-                        }
-                    }
-                }
-                "item/completed" => {
-                    let p = &event["params"];
-                    if p["threadId"] != rpc.thread_id || p["turnId"] != json!(rpc.turn_id) {
-                        continue;
-                    }
-                    let item = &p["item"];
-                    if item["type"] == "agentMessage" {
-                        if let Some(id) = item["id"].as_str() {
-                            let changed = self.streams.lock().map_err(err)?.complete(&self.store,id,item["text"].as_str().unwrap_or_default(),item["phase"].as_str(),&rpc.thread_id,rpc.turn_id.as_deref().unwrap(),&user.chat_session_id)?;
-                            if changed { self.emit()?; }
-                        }
-                    }
-                    if item["type"] == "dynamicToolCall" {
-                        rpc.confirm_tool(item)?;
+                "item/started" | "item/agentMessage/delta" | "item/completed" => {
+                    let turn = rpc.turn_id.clone().unwrap_or_default();
+                    let changed = {
+                        let mut streams = self.streams.lock().map_err(err)?;
+                        apply_stream_event(&mut streams, &self.store, &event, &rpc.thread_id, &turn, &user.chat_session_id)?
+                    };
+                    if changed { self.emit()?; }
+                    if method == "item/completed"
+                        && event["params"]["threadId"] == rpc.thread_id
+                        && event["params"]["turnId"] == json!(rpc.turn_id)
+                        && event["params"]["item"]["type"] == "dynamicToolCall"
+                        && rpc.confirm_tool(&event["params"]["item"])?
+                    {
                         self.state("codex", "running", "검토 결과를 반영하는 중")?;
                     }
                 }
@@ -805,30 +1008,16 @@ impl Engine {
                             )
                         }
                     };
-                    let latest = self.store.snapshot()?;
-                    let pending = latest
-                        .messages
-                        .iter()
-                        .filter(|m| {
-                            m.speaker == "user"
-                                && m.chat_session_id == user.chat_session_id
-                                && m.delivery == "queued"
-                                && !m.content.starts_with("@arch ")
-                        })
-                        .cloned()
-                        .collect::<Vec<_>>();
+                    let (requirements_version, pending) = self.store.pending_requirements(&user.chat_session_id)?;
                     let ids = pending.iter().map(|m| m.id.clone()).collect::<Vec<_>>();
-                    let envelope = json!({"kind":"arch_review_delivery","archReview":review,
-                        "latestUserRequirements":{"conversationVersion":self.store.session_version(&user.chat_session_id)?,"messages":pending},
-                        "reviewIsStale":review_version!=self.store.session_version(&user.chat_session_id)?,"processingOrder":["latestUserRequirements","archReview"]});
+                    let envelope = review_envelope(review, review_version, requirements_version, pending);
                     self.state("codex", "resuming", "최신 요구사항과 리뷰를 전달하는 중")?;
                     rpc.reply_to_tool_call(&event, envelope, success).await?;
-                    self.store.bind_messages(
+                    self.store.deliver_requirements(
                         &ids,
                         &rpc.thread_id,
                         rpc.turn_id.as_deref().ok_or("Codex 턴이 없습니다")?,
                     )?;
-                    self.store.delivery(&ids, "delivered")?;
                     self.emit()?;
                 }
                 "turn/completed" => {
@@ -878,14 +1067,26 @@ impl Engine {
             std::path::Path::new(path), &self.data_dir, saved.thread_id.as_deref(), saved.model.as_deref(), &user.content, stop.clone(),
         ).await?;
         if *stop.borrow() { return Err("OpenCode 실행 중단".into()); }
-        let turn = uuid::Uuid::new_v4().to_string();
-        self.store.bind_codex_session(&saved.id, &answer.session_id, &answer.session_id)?;
-        self.store.confirm_turn_start(&user.id, &answer.session_id, &turn)?;
-        self.store.routed_message("opencode", &answer.text, false, Route {
-            channel: "main", kind: "answer", thread_id: Some(answer.session_id),
-            turn_id: Some(turn), chat_session_id: Some(saved.id), ..Route::default()
-        })?;
+        commit_lead_answer(&self.store, "opencode", &saved.id, &user.id, &answer.session_id, &answer.text)?;
         self.state(id, "completed", "답변 완료")?;
+        Ok(())
+    }
+
+    /// One Claude Code turn. The CLI runs as a fresh process per turn and resumes
+    /// the saved conversation id, so an answer never depends on a process that
+    /// outlived the previous turn. The session and its registration are both
+    /// required, and `claude_runner` refuses a registration the adapter does not
+    /// claim, so the branch cannot run a CLI that was never mapped.
+    async fn claude_turn(&self, user: &Message, stop: watch::Receiver<bool>) -> Result<()> {
+        let saved = self.store.session(&user.chat_session_id)?;
+        let (instance_id, path) = claude_runner(&self.store, &saved)?;
+        self.state(&instance_id, "running", "Claude Code 답변을 준비하는 중")?;
+        let answer = crate::claude::run(
+            &path, &self.data_dir, saved.thread_id.as_deref(), saved.model.as_deref(), &user.content, stop.clone(),
+        ).await?;
+        if *stop.borrow() { return Err("Claude Code 실행 중단".into()); }
+        commit_lead_answer(&self.store, "claude_code", &saved.id, &user.id, &answer.session_id, &answer.text)?;
+        self.state(&instance_id, "completed", "답변 완료")?;
         Ok(())
     }
 }
@@ -905,6 +1106,40 @@ mod compact_event_tests {
         assert!(!matches_compaction_item(&completed, "thread-b", "turn-a", Some("item-a"), "item/completed"));
         assert!(!matches_compaction_item(&completed, "thread-a", "turn-b", Some("item-a"), "item/completed"));
         assert!(!matches_compaction_item(&completed, "thread-a", "turn-a", Some("item-b"), "item/completed"));
+    }
+}
+
+#[cfg(test)]
+mod envelope_tests {
+    use super::review_envelope;
+    use serde_json::json;
+
+    #[test]
+    fn review_and_latest_requirements_stay_separate_with_an_explicit_staleness_flag() {
+        // Nothing arrived while Arch was reviewing: the review is current and the
+        // requirements field is still present, empty, with its own version.
+        let fresh = review_envelope(json!({"status":"success","answer":"review"}), 3, 3, vec![]);
+        assert_eq!(fresh["kind"], "arch_review_delivery");
+        assert_eq!(fresh["archReview"]["answer"], "review");
+        assert_eq!(fresh["latestUserRequirements"]["conversationVersion"], 3);
+        assert_eq!(fresh["latestUserRequirements"]["messages"], json!([]));
+        assert_eq!(fresh["reviewIsStale"], false);
+        assert_eq!(fresh["processingOrder"], json!(["latestUserRequirements", "archReview"]));
+
+        // A message that arrived during the review makes it stale and travels in
+        // its own field: it must not be merged into archReview, and the review
+        // result itself must not be reported as a fresh verification.
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(&dir.path().join("envelope.sqlite")).unwrap();
+        let late = store.message("user", "new requirement", false).unwrap();
+        let stale = review_envelope(json!({"status":"success","answer":"old review"}), 2, 3, vec![late]);
+        assert_eq!(stale["reviewIsStale"], true);
+        assert_eq!(stale["latestUserRequirements"]["conversationVersion"], 3);
+        assert_eq!(stale["latestUserRequirements"]["messages"][0]["content"], "new requirement");
+        assert_eq!(stale["latestUserRequirements"]["messages"][0]["delivery"], "queued");
+        assert_eq!(stale["archReview"]["answer"], "old review");
+        assert!(stale["archReview"].get("messages").is_none());
+        assert!(stale["archReview"].get("latestUserRequirements").is_none());
     }
 }
 
@@ -1016,5 +1251,280 @@ mod switch_tests {
         assert!(interrupt_consumed_input(&store, &input.id).unwrap());
         assert!(store.confirm_turn_start(&input.id, "thread-b", "turn-b").is_err());
         assert_eq!(store.snapshot().unwrap().messages[0].delivery, "interrupted");
+    }
+}
+
+#[cfg(test)]
+mod cli_commit_tests {
+    use super::commit_lead_answer;
+    use crate::store::Store;
+
+    fn store() -> (tempfile::TempDir, Store) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("cli.sqlite")).unwrap();
+        (dir, store)
+    }
+
+    fn commit(store: &Store, speaker: &str, user: &str) -> crate::store::Result<()> {
+        commit_lead_answer(store, speaker, "default-session", user, "external-session", "CLI 답변")
+    }
+
+    #[test]
+    fn a_finished_opencode_turn_binds_the_external_session_and_stores_the_answer() {
+        let (_dir, store) = store();
+        let user = store.message("user", "질문", false).unwrap();
+        commit(&store, "opencode", &user.id).unwrap();
+        let session = store.session("default-session").unwrap();
+        assert_eq!(session.thread_id.as_deref(), Some("external-session"));
+        assert_eq!(session.session_id, "external-session");
+        let messages = store.snapshot().unwrap().messages;
+        assert_eq!(messages.len(), 2);
+        assert_eq!((messages[0].delivery.as_str(), messages[0].turn_id.is_some()), ("delivered", true));
+        assert_eq!((messages[1].speaker.as_str(), messages[1].channel.as_str()), ("opencode", "main"));
+        assert_eq!(
+            (messages[1].content.as_str(), messages[1].delivery.as_str()),
+            ("CLI 답변", "delivered")
+        );
+    }
+
+    #[test]
+    fn a_finished_claude_turn_uses_the_same_rows_under_its_own_speaker() {
+        // The two CLI leads share the commit ordering but must not share an author
+        // name: an OpenCode answer stored as `claude_code` (or the reverse) would
+        // attribute the text to an agent that never ran.
+        let (_dir, store) = store();
+        let user = store.message("user", "질문", false).unwrap();
+        commit(&store, "claude_code", &user.id).unwrap();
+        let session = store.session("default-session").unwrap();
+        assert_eq!(session.thread_id.as_deref(), Some("external-session"));
+        let messages = store.snapshot().unwrap().messages;
+        assert_eq!(messages.len(), 2);
+        assert_eq!((messages[0].delivery.as_str(), messages[0].turn_id.is_some()), ("delivered", true));
+        assert_eq!((messages[1].speaker.as_str(), messages[1].channel.as_str()), ("claude_code", "main"));
+        assert_eq!(messages[1].thread_id.as_deref(), Some("external-session"));
+    }
+
+    #[test]
+    fn a_cancelled_turn_neither_moves_the_external_session_nor_stores_an_answer() {
+        for speaker in ["opencode", "claude_code"] {
+            let (_dir, store) = store();
+            let user = store.message("user", "질문", false).unwrap();
+            store.cancel_queued("default-session").unwrap();
+            assert!(commit(&store, speaker, &user.id).is_err(), "{speaker}");
+            let session = store.session("default-session").unwrap();
+            assert_eq!(session.thread_id, None, "{speaker}");
+            assert_eq!(session.session_id, "", "{speaker}");
+            let messages = store.snapshot().unwrap().messages;
+            assert_eq!(messages.len(), 1, "{speaker}");
+            assert_eq!(messages[0].delivery, "cancelled", "{speaker}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod claude_runner_tests {
+    use super::claude_runner;
+    use crate::store::Store;
+    use rusqlite::params;
+
+    fn new_store() -> (tempfile::TempDir, Store) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("claude.sqlite")).unwrap();
+        (dir, store)
+    }
+
+    fn register(dir: &std::path::Path, store: &Store, role: &str) -> String {
+        // The adapter only claims the native install layout, so the fixture has
+        // to sit where a real `claude.exe` does.
+        let exe = dir.join(".local/bin/claude.exe");
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        std::fs::write(&exe, b"probe only").unwrap();
+        store
+            .register_agent_instance("claude_code", &exe.to_string_lossy(), role)
+            .unwrap()
+            .id
+    }
+
+    fn point(store: &Store, provider: &str, instance: Option<&str>) {
+        store
+            .db
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE chat_sessions SET provider=?1,agent_instance_id=?2 WHERE id='default-session'",
+                params![provider, instance],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn only_a_claude_session_with_a_runnable_lead_registration_resolves() {
+        let (dir, store) = new_store();
+        let instance = register(dir.path(), &store, "lead");
+        let exe = std::fs::canonicalize(dir.path().join(".local/bin/claude.exe")).unwrap();
+
+        // A Codex session must never be answered by the Claude branch.
+        let codex = store.session("default-session").unwrap();
+        assert!(claude_runner(&store, &codex).unwrap_err().contains("Claude Code 세션이 아닙니다"));
+
+        point(&store, "claude_code", None);
+        let saved = store.session("default-session").unwrap();
+        assert!(claude_runner(&store, &saved).unwrap_err().contains("등록 ID가 없습니다"));
+
+        point(&store, "claude_code", Some("unregistered"));
+        let saved = store.session("default-session").unwrap();
+        assert!(claude_runner(&store, &saved).unwrap_err().contains("등록을 찾을 수 없습니다"));
+
+        point(&store, "claude_code", Some(&instance));
+        let saved = store.session("default-session").unwrap();
+        let (id, path) = claude_runner(&store, &saved).unwrap();
+        assert_eq!(id, instance);
+        assert_eq!(path, exe);
+    }
+
+    #[test]
+    fn a_registration_without_a_lead_role_or_a_present_file_does_not_run() {
+        let (dir, store) = new_store();
+        let reviewer = register(dir.path(), &store, "reviewer");
+        point(&store, "claude_code", Some(&reviewer));
+        let saved = store.session("default-session").unwrap();
+        assert!(claude_runner(&store, &saved).unwrap_err().contains("실행 가능하지 않습니다"));
+
+        // A registration that was removed from disk after it was stored cannot
+        // run either: the file check is repeated at turn time, not only at
+        // registration time.
+        let (dir2, store2) = new_store();
+        let lead = register(dir2.path(), &store2, "lead");
+        point(&store2, "claude_code", Some(&lead));
+        std::fs::remove_file(dir2.path().join(".local/bin/claude.exe")).unwrap();
+        let saved = store2.session("default-session").unwrap();
+        assert!(claude_runner(&store2, &saved).unwrap_err().contains("실행 가능하지 않습니다"));
+    }
+
+    #[test]
+    fn a_lead_registration_outside_the_claimed_layout_never_runs() {
+        // `role` alone used to decide this. The adapter only claims the native
+        // install directory, so an executable registered anywhere else keeps
+        // `connection_kind = not_configured` and must not answer a turn.
+        let (dir, store) = new_store();
+        let exe = dir.path().join("bin/claude.exe");
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        std::fs::write(&exe, b"probe only").unwrap();
+        let instance = store
+            .register_agent_instance("claude_code", &exe.to_string_lossy(), "lead")
+            .unwrap();
+        assert_eq!(
+            (instance.connection.as_str(), instance.active_role),
+            ("not_configured", None)
+        );
+        point(&store, "claude_code", Some(&instance.id));
+        let saved = store.session("default-session").unwrap();
+        assert!(claude_runner(&store, &saved).unwrap_err().contains("실행 가능하지 않습니다"));
+    }
+}
+
+#[cfg(test)]
+mod session_route_tests {
+    use super::{compact_thread, turn_route, TurnRoute};
+    use crate::store::Store;
+
+    fn store() -> (tempfile::TempDir, Store) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("route.sqlite")).unwrap();
+        (dir, store)
+    }
+
+    fn opencode_session(dir: &std::path::Path, store: &Store) -> crate::store::Session {
+        let cli = dir.join("node_modules/opencode-ai/bin/opencode.exe");
+        std::fs::create_dir_all(cli.parent().unwrap()).unwrap();
+        std::fs::write(&cli, b"probe only").unwrap();
+        let instance = store.register_agent_instance("opencode", &cli.to_string_lossy(), "lead").unwrap();
+        let created = store.create_opencode_session("default", "OpenCode route", &instance.id).unwrap();
+        store.session(&created.id).unwrap()
+    }
+
+    #[test]
+    fn a_codex_session_owns_the_codex_turn_and_the_arch_question_channel() {
+        let (_dir, store) = store();
+        let saved = store.session("default-session").unwrap();
+        assert_eq!(saved.provider, "codex");
+        assert_eq!(turn_route(&saved, "codex"), Some(TurnRoute::Codex));
+        assert_eq!(turn_route(&saved, "antigravity"), Some(TurnRoute::Arch));
+        for target in ["opencode", "claude_code", "gemini_cli", ""] {
+            assert_eq!(turn_route(&saved, target), None, "{target}");
+        }
+    }
+
+    #[test]
+    fn an_opencode_session_only_answers_its_own_cli() {
+        let (dir, store) = store();
+        let saved = opencode_session(dir.path(), &store);
+        assert_eq!(saved.provider, "opencode");
+        assert_eq!(turn_route(&saved, "opencode"), Some(TurnRoute::OpenCode));
+        for target in ["codex", "antigravity", "claude_code"] {
+            assert_eq!(turn_route(&saved, target), None, "{target}");
+        }
+    }
+
+    #[test]
+    fn a_provider_without_a_branch_never_falls_through_to_codex() {
+        // The worker dispatches on this allowlist, so a provider it does not know
+        // must be refused for every target instead of being answered by Codex.
+        let (_dir, store) = store();
+        for provider in ["gemini_cli", "mock_agent", "unknown"] {
+            store
+                .db
+                .lock()
+                .unwrap()
+                .execute("UPDATE chat_sessions SET provider=?1 WHERE id='default-session'", [provider])
+                .unwrap();
+            let saved = store.session("default-session").unwrap();
+            assert_eq!(saved.provider, provider);
+            for target in ["codex", "antigravity", "opencode", "claude_code", provider] {
+                assert_eq!(turn_route(&saved, target), None, "{provider} -> {target}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_claude_session_owns_only_its_own_cli() {
+        // The Claude branch exists so the provider cannot fall through to Codex,
+        // but it answers nothing else: no Arch channel, no Codex turn.
+        let (_dir, store) = store();
+        store
+            .db
+            .lock()
+            .unwrap()
+            .execute("UPDATE chat_sessions SET provider='claude_code' WHERE id='default-session'", [])
+            .unwrap();
+        let saved = store.session("default-session").unwrap();
+        assert_eq!(turn_route(&saved, "claude_code"), Some(TurnRoute::Claude));
+        for target in ["codex", "antigravity", "opencode", "gemini_cli", ""] {
+            assert_eq!(turn_route(&saved, target), None, "{target}");
+        }
+    }
+
+    #[test]
+    fn manual_compaction_is_a_codex_thread_operation_only() {
+        let (dir, store) = store();
+        let codex = store.session("default-session").unwrap();
+        assert!(compact_thread(&codex).unwrap_err().contains("스레드가 없습니다"));
+        // The Codex connection binds its thread on the first turn; compaction
+        // needs exactly that thread id.
+        store.bind_codex_session("default-session", "thread-a", "sess-a").unwrap();
+        let codex = store.session("default-session").unwrap();
+        assert_eq!(compact_thread(&codex).unwrap(), "thread-a");
+        // An OpenCode session stores its own CLI session id in `thread_id`, so it
+        // looks compactable to a thread-only check but must be refused.
+        let opencode = opencode_session(dir.path(), &store);
+        store
+            .db
+            .lock()
+            .unwrap()
+            .execute("UPDATE chat_sessions SET thread_id='ses_opencode' WHERE id=?1", [&opencode.id])
+            .unwrap();
+        let opencode = store.session(&opencode.id).unwrap();
+        assert_eq!(opencode.thread_id.as_deref(), Some("ses_opencode"));
+        assert!(compact_thread(&opencode).unwrap_err().contains("Codex 세션이 아니어서"));
     }
 }

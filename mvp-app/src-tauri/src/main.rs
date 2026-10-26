@@ -5,6 +5,7 @@ mod agents;
 mod mock_agent;
 mod registry;
 mod opencode;
+mod claude;
 mod engine;
 mod models;
 mod store;
@@ -48,12 +49,19 @@ fn list_agent_instances(engine: tauri::State<'_, Arc<Engine>>) -> Result<Vec<reg
 
 #[tauri::command]
 fn register_agent_instance(provider: String, path: String, role: String, engine: tauri::State<'_, Arc<Engine>>) -> Result<registry::Instance> {
-    engine.store.register_agent_instance(&provider, &path, &role)
+    let instance = registry::register_instance(&engine.store, engine.admission(), &provider, &path, &role)?;
+    // Registration writes an `agents` row, so the open WebView needs the new
+    // snapshot instead of waiting for the next unrelated chat event.
+    engine.emit()?;
+    Ok(instance)
 }
 
 #[tauri::command]
 fn unregister_agent_instance(id: String, engine: tauri::State<'_, Arc<Engine>>) -> Result<()> {
-    engine.store.unregister_agent_instance(&id)
+    registry::unregister_instance(&engine.store, engine.admission(), &id)?;
+    // Removal deletes that row; without the emit the Agents view keeps showing
+    // the removed instance's last status until another event arrives.
+    engine.emit()
 }
 
 #[tauri::command]
@@ -63,6 +71,7 @@ fn cancel_run(session_id: String, run_id: String, engine: tauri::State<'_, Arc<E
 
 #[tauri::command]
 async fn list_codex_models(engine: tauri::State<'_, Arc<Engine>>) -> Result<Vec<models::CodexModel>> {
+    engine.ensure_accepting()?;
     let mut rpc = CODEX.connect(engine.store.clone()).await?;
     let result = async { rpc.handshake().await?; rpc.list_models().await }.await;
     let closed = LeadSession::close(&mut rpc).await;
@@ -74,6 +83,7 @@ async fn list_codex_models(engine: tauri::State<'_, Arc<Engine>>) -> Result<Vec<
 
 #[tauri::command]
 async fn list_opencode_models(session_id: String, engine: tauri::State<'_, Arc<Engine>>) -> Result<Vec<opencode::OpenCodeModel>> {
+    engine.ensure_accepting()?;
     engine.list_opencode_models(&session_id).await
 }
 
@@ -104,6 +114,7 @@ fn send_message(
 
 #[tauri::command]
 fn create_room(name: String, engine: tauri::State<'_, Arc<Engine>>) -> Result<workspace::Room> {
+    engine.ensure_accepting()?;
     let room = engine.store.create_room(&name)?;
     engine.emit()?;
     Ok(room)
@@ -115,8 +126,11 @@ fn create_session(
     agent_instance_id: Option<String>,
     engine: tauri::State<'_, Arc<Engine>>,
 ) -> Result<store::Session> {
+    engine.ensure_accepting()?;
+    // The registration decides the session kind: the front end only passes the
+    // selected agent id, and every CLI Lead owns a different provider.
     let session = if let Some(id) = agent_instance_id {
-        engine.store.create_opencode_session(&room_id, &name, &id)?
+        engine.store.create_agent_session(&room_id, &name, &id)?
     } else { engine.store.create_session(&room_id, &name)? };
     engine.emit()?;
     Ok(session)
@@ -127,6 +141,7 @@ async fn list_codex_sessions(
     search: Option<String>,
     engine: tauri::State<'_, Arc<Engine>>,
 ) -> Result<Value> {
+    engine.ensure_accepting()?;
     let mut rpc = CODEX.connect(engine.store.clone()).await?;
     let result = async {
         rpc.handshake().await?;
@@ -153,6 +168,7 @@ async fn import_codex_session(
     if mode != "copy" && mode != "resume" {
         return Err("가져오기 방식을 선택해 주세요".into());
     }
+    engine.ensure_accepting()?;
     let mut rpc = CODEX.connect(engine.store.clone()).await?;
     let result = async {
         rpc.handshake().await?;
@@ -224,6 +240,16 @@ async fn close_probe(app: tauri::AppHandle, engine: tauri::State<'_, Arc<Engine>
 fn main() {
     let closing = Arc::new(AtomicBool::new(false));
     tauri::Builder::default()
+        // Must stay the first plugin: it decides whether this process owns the
+        // app before any other plugin or setup work touches the shared WebView2
+        // user data folder. A second launch only surfaces the running window.
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.unminimize();
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        }))
         .setup(|app| {
             let probe_dir = if cfg!(debug_assertions) {
                 std::env::args_os().collect::<Vec<_>>().windows(2)
@@ -238,6 +264,11 @@ fn main() {
             app.manage(engine);
             if let Some(window) = app.get_webview_window("main") {
                 window_state::restore(&window, &window_data_dir);
+                // Show explicitly instead of trusting the window config: a
+                // `visible: false` (or a future default change) would otherwise
+                // leave a running app with no window the user can reach. Focus
+                // stays untouched here so launching does not steal it.
+                let _ = window.show();
             }
             Ok(())
         })

@@ -3,6 +3,7 @@ use crate::{agents::{registered, AgentRole, ConnectionKind}, store::{err, timest
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 
 const PROVIDERS: [(&str, &str, &str); 3] = [
     ("claude_code", "Claude Code", "claude.exe"),
@@ -72,14 +73,38 @@ fn provider(provider: &str) -> Result<(&'static str, &'static str)> {
         .ok_or_else(|| "지원 후보 목록에 없는 에이전트 종류입니다".into())
 }
 
+/// A user registration becomes `supported` only when its executable sits where
+/// the adapter's invocation contract was written for: the OpenCode npm shim, or
+/// the Claude Code native install directory. The stored path decides that, and
+/// `connection_kind` comes from the same predicate, so the connection a
+/// registration reports and the role it activates cannot disagree.
+fn recognized_install(provider: &str, path: &str) -> bool {
+    let path = path.replace('\\', "/").to_lowercase();
+    match provider {
+        "opencode" => path.ends_with("/node_modules/opencode-ai/bin/opencode.exe"),
+        "claude_code" => path.ends_with("/.local/bin/claude.exe"),
+        _ => false,
+    }
+}
+
+fn connection_kind(provider: &str, role: &str, path: &str) -> &'static str {
+    if role != "lead" || !recognized_install(provider, path) { return "not_configured"; }
+    match provider {
+        "opencode" => "opencode_cli_json",
+        "claude_code" => crate::claude::CONNECTION_KIND,
+        _ => "not_configured",
+    }
+}
+
 fn active_role(provider: &str, connection: &str, role: &str, builtin: bool, path: Option<&str>) -> Option<&'static str> {
-    if !builtin && !(provider == "opencode" && path.is_some_and(|p| p.replace('\\', "/").to_lowercase().ends_with("/node_modules/opencode-ai/bin/opencode.exe"))) { return None; }
+    if !builtin && !path.is_some_and(|p| recognized_install(provider, p)) { return None; }
     registered().iter().find_map(|adapter| {
         let descriptor = adapter.descriptor();
         let expected_connection = match descriptor.connection {
             ConnectionKind::AppServerStdioJsonRpc => "app_server_stdio_json_rpc",
             ConnectionKind::AgyCliStreamJson => "agy_cli_stream_json",
             ConnectionKind::OpenCodeCliJson => "opencode_cli_json",
+            ConnectionKind::ClaudeCodeCli => crate::claude::CONNECTION_KIND,
             #[cfg(test)] ConnectionKind::MockInProcess => "mock_in_process",
         };
         if descriptor.id != provider || connection != expected_connection { return None; }
@@ -183,28 +208,71 @@ impl Store {
         let path_text = canonical.to_string_lossy().into_owned();
         let key = path_text.to_lowercase();
         let id = uuid::Uuid::new_v4().to_string();
-        let db = self.db.lock().map_err(err)?;
+        let mut db = self.db.lock().map_err(err)?;
         let exists: Option<String> = db.query_row("SELECT id FROM agent_instances WHERE provider=?1 AND path_key=?2", params![provider_id,key], |r| r.get(0)).optional().map_err(err)?;
         if exists.is_some() { return Err("이미 등록된 실행 파일입니다".into()); }
-        let connection = if provider_id == "opencode" && role == "lead" && path_text.replace('\\', "/").to_lowercase().ends_with("/node_modules/opencode-ai/bin/opencode.exe") { "opencode_cli_json" } else { "not_configured" };
-        db.execute("INSERT INTO agent_instances(id,provider,name,executable_path,path_key,connection_kind,role,source,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7,'user',?8)",
+        let connection = connection_kind(provider_id, role, &path_text);
+        // The instance row, its execution-status row, and the revision that makes
+        // the change visible to snapshot consumers commit together, so the WebView
+        // never sees a registration without the row that explains its status.
+        let tx = db.transaction().map_err(err)?;
+        tx.execute("INSERT INTO agent_instances(id,provider,name,executable_path,path_key,connection_kind,role,source,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7,'user',?8)",
             params![id,provider_id,name,path_text,key,connection,role,timestamp()]).map_err(err)?;
-        if connection == "opencode_cli_json" {
-            db.execute("INSERT OR IGNORE INTO agents(id,status,detail,updated_at) VALUES(?1,'idle','대기 중',?2)", params![id,timestamp()]).map_err(err)?;
-        }
+        // Every registration owns exactly one `agents` row so the Agents badge
+        // (`snapshot.agents.length`) and the Agents view list the same agents.
+        // An instance without an execution connection cannot report a run
+        // state, so its row stays `unknown` instead of pretending to be idle.
+        let (status, detail) = if connection == "not_configured" {
+            ("unknown", "실행 연결이 설정되지 않았습니다")
+        } else {
+            ("idle", "대기 중")
+        };
+        tx.execute(
+            "INSERT OR IGNORE INTO agents(id,status,detail,updated_at) VALUES(?1,?2,?3,?4)",
+            params![id, status, detail, timestamp()],
+        )
+        .map_err(err)?;
+        tx.execute("UPDATE meta SET revision=revision+1", []).map_err(err)?;
+        tx.commit().map_err(err)?;
         drop(db);
         self.list_agent_instances()?.into_iter().find(|item| item.id == id).ok_or_else(|| "등록 결과를 읽을 수 없습니다".into())
     }
 
     pub fn unregister_agent_instance(&self, id: &str) -> Result<()> {
-        let db = self.db.lock().map_err(err)?;
+        let mut db = self.db.lock().map_err(err)?;
         let sessions: i64 = db.query_row("SELECT COUNT(*) FROM chat_sessions WHERE agent_instance_id=?1", [id], |r| r.get(0)).map_err(err)?;
         if sessions > 0 { return Err("이 에이전트를 사용하는 세션이 있어 등록 해제할 수 없습니다".into()); }
-        let count = db.execute("DELETE FROM agent_instances WHERE id=?1 AND source='user'", [id]).map_err(err)?;
+        // Both deletes and the revision bump are one transaction: a failure or a
+        // crash can no longer leave an `agents` row behind for a removed instance.
+        let tx = db.transaction().map_err(err)?;
+        let count = tx.execute("DELETE FROM agent_instances WHERE id=?1 AND source='user'", [id]).map_err(err)?;
         if count == 0 { return Err("등록 해제할 사용자 에이전트를 찾을 수 없습니다".into()); }
-        db.execute("DELETE FROM agents WHERE id=?1", [id]).map_err(err)?;
-        Ok(())
+        tx.execute("DELETE FROM agents WHERE id=?1", [id]).map_err(err)?;
+        tx.execute("UPDATE meta SET revision=revision+1", []).map_err(err)?;
+        tx.commit().map_err(err)
     }
+}
+
+/// Command entry points for agent registration write to SQLite, and `shutdown`
+/// checkpoints WAL after it closes admission. The guard therefore lives beside
+/// the store call instead of only in the Tauri wrapper, so the rejection order
+/// (guard first, no write) is testable without a running app.
+pub(crate) fn register_instance(
+    store: &Store,
+    accepting: &AtomicBool,
+    provider_id: &str,
+    path: &str,
+    role: &str,
+) -> Result<Instance> {
+    crate::engine::ensure_accepting(accepting)?;
+    store.register_agent_instance(provider_id, path, role)
+}
+
+/// Registration removal is the other half of the same gap: it deletes rows that
+/// the shutdown checkpoint is finalizing, so it needs the same admission guard.
+pub(crate) fn unregister_instance(store: &Store, accepting: &AtomicBool, id: &str) -> Result<()> {
+    crate::engine::ensure_accepting(accepting)?;
+    store.unregister_agent_instance(id)
 }
 
 #[cfg(test)]
@@ -289,6 +357,107 @@ mod tests {
     }
 
     #[test]
+    fn registration_writes_are_refused_while_closing() {
+        // `shutdown` closes admission before it stops the worker and checkpoints
+        // WAL, so a late registration must fail without touching SQLite.
+        use std::sync::atomic::Ordering;
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(&temp.path().join("chat.sqlite")).unwrap();
+        let exe = temp.path().join("claude.exe");
+        std::fs::write(&exe, b"do not execute").unwrap();
+        let accepting = AtomicBool::new(true);
+        let item = register_instance(&store, &accepting, "claude_code", &exe.to_string_lossy(), "lead").unwrap();
+        let before = store.list_agent_instances().unwrap().len();
+        accepting.store(false, Ordering::SeqCst);
+        let register_error = register_instance(&store, &accepting, "claude_code", &exe.to_string_lossy(), "reviewer").unwrap_err();
+        assert!(register_error.contains("종료 중"), "{register_error}");
+        assert_eq!(store.list_agent_instances().unwrap().len(), before);
+        let unregister_error = unregister_instance(&store, &accepting, &item.id).unwrap_err();
+        assert!(unregister_error.contains("종료 중"), "{unregister_error}");
+        assert!(store.list_agent_instances().unwrap().iter().any(|entry| entry.id == item.id));
+        // The guard is not a one-off: nothing reopens admission during shutdown.
+        assert!(register_instance(&store, &accepting, "claude_code", &exe.to_string_lossy(), "lead").is_err());
+    }
+
+    #[test]
+    fn registration_and_removal_are_visible_to_snapshot_consumers() {
+        // The WebView only accepts a snapshot whose revision is not older than the
+        // one it holds, so both writes must bump it and the status row must appear
+        // and disappear with the instance.
+        let temp = tempfile::tempdir().unwrap();
+        let cli = temp.path().join("node_modules/opencode-ai/bin/opencode.exe");
+        std::fs::create_dir_all(cli.parent().unwrap()).unwrap();
+        std::fs::write(&cli, b"probe only").unwrap();
+        let store = Store::open(&temp.path().join("chat.sqlite")).unwrap();
+        let before = store.snapshot().unwrap();
+        assert_eq!(before.agents.len(), 2);
+        let instance = store.register_agent_instance("opencode", &cli.to_string_lossy(), "lead").unwrap();
+        let registered = store.snapshot().unwrap();
+        assert!(registered.revision > before.revision, "{} -> {}", before.revision, registered.revision);
+        let row = registered.agents.iter().find(|agent| agent.id == instance.id).expect("registered instance row");
+        assert_eq!((row.status.as_str(), registered.agents.len()), ("idle", 3));
+        assert!(store.status(&instance.id, "running", "답변 중").unwrap());
+        store.unregister_agent_instance(&instance.id).unwrap();
+        let removed = store.snapshot().unwrap();
+        assert!(removed.revision > registered.revision, "{} -> {}", registered.revision, removed.revision);
+        assert!(removed.agents.iter().all(|agent| agent.id != instance.id));
+        assert_eq!(removed.agents.len(), 2);
+        assert!(store.list_agent_instances().unwrap().iter().all(|entry| entry.id != instance.id));
+        assert!(cli.exists());
+    }
+
+    #[test]
+    fn every_registration_owns_one_status_row_so_badge_and_list_agree() {
+        // `main.tsx` counts `snapshot.agents.length` for the Agents badge while
+        // the Agents view lists the builtin ids plus every `agent_instances` row.
+        // A registration that wrote no status row made the badge count one agent
+        // fewer than the view listed. Registration now always writes the row and
+        // reopening the store backfills it for registrations stored before this.
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("chat.sqlite");
+        let exe = temp.path().join("claude.exe");
+        std::fs::write(&exe, b"do not execute").unwrap();
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.snapshot().unwrap().agents.len(), 2);
+        let instance = store
+            .register_agent_instance("claude_code", &exe.to_string_lossy(), "lead")
+            .unwrap();
+        let registered = store.snapshot().unwrap();
+        assert_eq!(registered.agents.len(), 3);
+        assert_eq!(registered.agents.iter().filter(|agent| agent.id == instance.id).count(), 1);
+        // An instance that cannot run must not report a run state it never had.
+        assert_eq!(
+            registered.agents.iter().find(|agent| agent.id == instance.id).unwrap().status,
+            "unknown"
+        );
+        // Simulate a row that an earlier build never wrote.
+        store
+            .db
+            .lock()
+            .unwrap()
+            .execute("DELETE FROM agents WHERE id=?1", [&instance.id])
+            .unwrap();
+        assert_eq!(store.snapshot().unwrap().agents.len(), 2);
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        let backfilled = reopened.snapshot().unwrap();
+        assert_eq!(backfilled.agents.len(), 3);
+        let row = backfilled.agents.iter().find(|agent| agent.id == instance.id).unwrap();
+        assert_eq!((row.status.as_str(), row.detail.as_str()), ("unknown", "실행 연결이 설정되지 않았습니다"));
+        // The builtin rows keep their own status while the backfill runs.
+        assert_eq!(
+            backfilled.agents.iter().find(|agent| agent.id == "codex").unwrap().status,
+            "idle"
+        );
+        // Backfilling is idempotent and removal still takes the row with it.
+        drop(reopened);
+        let reopened = Store::open(&path).unwrap();
+        assert_eq!(reopened.snapshot().unwrap().agents.len(), 3);
+        reopened.unregister_agent_instance(&instance.id).unwrap();
+        assert_eq!(reopened.snapshot().unwrap().agents.len(), 2);
+    }
+
+    #[test]
     fn active_role_requires_matching_adapter_connection_and_capability() {
         let temp = tempfile::tempdir().unwrap();
         let store = Store::open(&temp.path().join("chat.sqlite")).unwrap();
@@ -319,6 +488,76 @@ mod tests {
         let saved = reopened.session(&session.id).unwrap();
         assert_eq!((saved.provider.as_str(), saved.agent_instance_id.as_deref()), ("opencode", Some(instance.id.as_str())));
         assert_eq!(reopened.list_agent_instances().unwrap().into_iter().find(|a| a.id == instance.id).unwrap().active_role, Some("lead"));
+    }
+
+    #[test]
+    fn a_claude_registration_at_the_installed_layout_becomes_a_runnable_lead() {
+        let temp = tempfile::tempdir().unwrap();
+        let exe = temp.path().join(".local/bin/claude.exe");
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        std::fs::write(&exe, b"probe only").unwrap();
+        let path = temp.path().join("chat.sqlite");
+        let store = Store::open(&path).unwrap();
+        let item = store.register_agent_instance("claude_code", &exe.to_string_lossy(), "lead").unwrap();
+        // The adapter claims this connection, so the registration is supported
+        // while authentication and availability stay unknown: a file check is
+        // not a login and not a usable model.
+        assert_eq!((item.connection.as_str(), item.active_role), (crate::claude::CONNECTION_KIND, Some("lead")));
+        assert_eq!((item.support, item.authentication, item.availability), ("supported", "unknown", "unknown"));
+        // A runnable connection owns an idle status row instead of `unknown`.
+        let row = store.snapshot().unwrap().agents.into_iter().find(|a| a.id == item.id).unwrap();
+        assert_eq!((row.status.as_str(), row.detail.as_str()), ("idle", "대기 중"));
+        // The session path opens on the same registration, and the session keeps
+        // the provider the registration names.
+        let session = store.create_agent_session("default", "Claude test", &item.id).unwrap();
+        assert_eq!((session.provider.as_str(), session.agent_instance_id.as_deref()), ("claude_code", Some(item.id.as_str())));
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        let saved = reopened.list_agent_instances().unwrap().into_iter().find(|a| a.id == item.id).unwrap();
+        assert_eq!((saved.active_role, saved.support), (Some("lead"), "supported"));
+        assert_eq!(reopened.session(&session.id).unwrap().provider, "claude_code");
+    }
+
+    #[test]
+    fn a_claude_registration_outside_the_installed_layout_stays_unsupported() {
+        // The same file name in another directory is not the layout the
+        // invocation contract was written for, so it must not report support.
+        let temp = tempfile::tempdir().unwrap();
+        let exe = temp.path().join("bin/claude.exe");
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        std::fs::write(&exe, b"probe only").unwrap();
+        let store = Store::open(&temp.path().join("chat.sqlite")).unwrap();
+        let item = store.register_agent_instance("claude_code", &exe.to_string_lossy(), "lead").unwrap();
+        assert_eq!((item.connection.as_str(), item.active_role), ("not_configured", None));
+        assert_eq!((item.support, item.availability), ("unsupported", "unavailable"));
+        let row = store.snapshot().unwrap().agents.into_iter().find(|a| a.id == item.id).unwrap();
+        assert_eq!((row.status.as_str(), row.detail.as_str()), ("unknown", "실행 연결이 설정되지 않았습니다"));
+        let error = store.create_agent_session("default", "Claude test", &item.id).err().expect("no connection");
+        assert!(error.contains("실행 연결이 설정되지 않은"), "{error}");
+    }
+
+    #[test]
+    fn a_backfilled_status_row_keeps_the_connection_the_registration_earned() {
+        // Registration reports `idle` for a connection it actually claimed. The
+        // reopen backfill used to decide that from a hardcoded OpenCode check,
+        // so a supported Claude registration whose status row was missing came
+        // back as `unknown`/`실행 연결이 설정되지 않았습니다` — the same
+        // "supported but shown as not configured" contradiction the registration
+        // path avoids. Both paths must read the same rule.
+        let temp = tempfile::tempdir().unwrap();
+        let exe = temp.path().join(".local/bin/claude.exe");
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        std::fs::write(&exe, b"probe only").unwrap();
+        let path = temp.path().join("chat.sqlite");
+        let store = Store::open(&path).unwrap();
+        let item = store.register_agent_instance("claude_code", &exe.to_string_lossy(), "lead").unwrap();
+        assert_eq!(item.connection.as_str(), crate::claude::CONNECTION_KIND);
+        // Simulate a row that an earlier build never wrote.
+        store.db.lock().unwrap().execute("DELETE FROM agents WHERE id=?1", [&item.id]).unwrap();
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        let row = reopened.snapshot().unwrap().agents.into_iter().find(|a| a.id == item.id).unwrap();
+        assert_eq!((row.status.as_str(), row.detail.as_str()), ("idle", "대기 중"));
     }
 
     #[test]

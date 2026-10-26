@@ -12,6 +12,10 @@ const probeLabels: Record<string, string> = {
   ready: '실행 가능', unavailable: '실행 불가', unknown: '불명', error: '점검 실패',
 };
 const activeStatuses = new Set(['starting', 'running', 'compacting', 'waiting_for_arch', 'arch_running', 'resuming', 'cancelling']);
+const connectionLabels: Record<string, string> = {
+  opencode_cli_json: 'OpenCode CLI · JSON',
+  claude_code_cli: 'Claude Code CLI · stream-json',
+};
 const agentName = (id: string) => id === 'codex' ? 'Codex Lead' : id === 'antigravity' ? 'Antigravity Arch' : id;
 
 type Props = {
@@ -92,7 +96,7 @@ export function AgentsView({ snapshot, probes, checking, probeError, onRefresh }
           <div><dt>인증</dt><dd>{status(selectedInstance?.authentication ?? probe?.authentication)}</dd></div>
           <div><dt>실행 가능</dt><dd>{status(selectedInstance?.availability ?? probe?.availability)}</dd></div>
           <div><dt>실행 상태</dt><dd>{execution}</dd></div>
-          <div><dt>연결 방식</dt><dd>{selectedInstance ? selectedInstance.connection === 'opencode_cli_json' ? 'OpenCode CLI · JSON' : '설정 필요' : probe?.connection ?? '점검 전'}</dd></div>
+          <div><dt>연결 방식</dt><dd>{selectedInstance ? connectionLabels[selectedInstance.connection] ?? '설정 필요' : probe?.connection ?? '점검 전'}</dd></div>
           <div><dt>활성 역할</dt><dd data-active-role={selectedInstance?.activeRole ?? selectedBuiltin?.activeRole ?? ''}>{selectedInstance?.activeRole === 'lead' || selectedBuiltin?.activeRole === 'lead' ? 'Lead' : selectedInstance?.activeRole === 'reviewer' || selectedBuiltin?.activeRole === 'reviewer' ? 'Reviewer' : selectedInstance || selectedBuiltin ? '없음' : '확인 중'}</dd></div>
           {selectedInstance && <><div><dt>지원</dt><dd>{selectedInstance.support === 'supported' ? '지원' : '미지원'}</dd></div><div><dt>종류</dt><dd>{selectedInstance.provider}</dd></div><div><dt>인스턴스 ID</dt><dd className="v0-agents-id">{selectedInstance.id}</dd></div><div><dt>희망 역할</dt><dd>{selectedInstance.role === 'lead' ? 'Lead' : 'Reviewer'}</dd></div><div><dt>실행 파일</dt><dd>{selectedInstance.path}</dd></div></>}
           <div><dt>점검 시각</dt><dd>{checkedAt}</dd></div>

@@ -13,6 +13,566 @@
 - `agents.rs`의 `Authentication`과 `Availability` enum에 `#[allow(dead_code)]` 추가해 컴파일 warning 2개를 제거했어. 이 variant들은 미래 확장용이라 현재 코드에서는 사용하지 않지만 설계상 유지하는 게 맞아.
 - `npm test` **50개 통과, 0개 실패**. `npm run build`와 `npm run build:desktop` 모두 통과. 같은 `esh-chat-mvp4.exe` 대상을 유지했어. 실제 OpenCode API 연결 성공 여부는 WebView 실행 검증이 필요해.
 
+## ARCHITECTURE.md의 어댑터 수와 상태 행 수 서술을 코드 사실로 정정 (2026-10-26, 문서 정합성)
+
+- 선택한 작업: 19~24회차가 "다음 작업" 1순위로 **다섯 번 미뤄 둔** `docs/ARCHITECTURE.md` 23행·41행 정정. 이번에는 미루지 않고 먼저 처리했어. 코드 변경 없이 **문서 두 줄만** 치환했고, 등록 조각(`9844058`)·화면 배선(`9d4b238`)·상태 행 백필(`7b0f164`) 이후 사실과 달라진 문장을 코드에 맞췄어. 요청 범위를 넘긴 리팩터링·기능 추가·문서 확장은 하지 않았어.
+- 변경 파일: `docs/ARCHITECTURE.md` 1개(2줄 치환). `git diff --stat` → `1 file changed, 2 insertions(+), 2 deletions(-)`.
+  - 23행: "Codex Lead/Antigravity Reviewer 어댑터, …" → "어댑터 4개(Codex·OpenCode·Claude Code Lead, Antigravity Reviewer), …". 이전 문장은 `registered()`가 4개를 반환하는 사실과 달라 OpenCode·Claude Code가 문서에서 사라져 있었어.
+  - 41행: "실행 상태는 기존 앱 전역 `agents` 2개 행을 유지하며 …" → "실행 상태는 앱 전역 `agents` 행으로 유지해 — 내장 Codex·Antigravity 2개에 더해 등록한 인스턴스마다 상태 행이 하나씩 생기고, 세션별 상태 이력 테이블은 없어." 7회차(등록마다 상태 행 생성) 이후 "2개 행"은 거짓이야. "세션별 상태 이력 테이블은 없어"는 지금도 사실이라 유지했어.
+- 정정 근거(코드에서 직접 확인한 줄, 문서 주장 ↔ 소스 대응):
+  - `src-tauri/src/agents.rs:177` `pub fn registered() -> [&'static dyn AgentAdapter; 4] { [&CODEX, &ANTIGRAVITY, &OPENCODE, &CLAUDE] }` → 어댑터는 4개. `:13` `ConnectionKind::ClaudeCodeCli`, `:205` `ClaudeCodeAdapter` descriptor(id `claude_code`)가 실제로 존재.
+  - `src-tauri/src/registry.rs:218-236` `register_agent_instance`가 `agent_instances` INSERT와 `agents` INSERT OR IGNORE를 **같은 트랜잭션**에서 수행(`INSERT OR IGNORE INTO agents(id,status,detail,updated_at)`) → 등록마다 상태 행 1개. `store.rs:148-157` 백필도 같은 규칙.
+  - `src/AgentsView.tsx:81` 목록이 `snapshot.agents.filter(id === 'codex' || id === 'antigravity')` + `registered.map(...)`로 그려지고, `src/main.tsx:256` 배지가 `snapshot.agents.length` → 행 수가 등록 수만큼 늘어난다는 서술과 일치.
+- 동작 보존: 코드·스키마·Tauri 명령·프런트를 한 줄도 바꾸지 않았어. Blocking Delegation, `request_arch_review`, `archReview`/`latestUserRequirements` 구조적 분리, `tool_deliveries`, 종료 순서, Arch 타임아웃 120초(범위 30~600), 단일 worker, DB 스키마·`user_version=6`, 실행 파일 이름 `esh-chat-mvp4` 모두 그대로야.
+- 검증 (실제 출력):
+  - `git diff --stat` → `docs/ARCHITECTURE.md | 4 ++--`, `1 file changed, 2 insertions(+), 2 deletions(-)`. 변경 파일이 문서 1개뿐임을 확인(코드 무변경).
+  - `cargo test --bin esh-chat-mvp4` (`mvp-app/src-tauri/`에서 `.tools`의 cargo 직접 실행) → `test result: ok. 90 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.98s`. 직전 회차(90 passed, 1.41s)와 동일 — 코드를 바꾸지 않았으므로 기준선 유지 확인이야. 경고는 기존 2건(`agents.rs`의 `Authenticated`·`Required`·`Error`, `Ready` 미생성 variant)뿐이고 새 경고는 없어. 로그 `mvp-app/evidence/ct-r25.log`(gitignore 대상).
+  - `node scripts/verify_external_threads.mjs` → `{"passed":true,"recordedRows":27,"scratchRowsHidden":9,"normalConversationsPreserved":true}`
+  - `npm run build` (`tsc -b && vite build`) → `✓ 298 modules transformed`, `✓ built in 4.82s` (`dist/assets/index-CXzmrCQ4.js` 433.84 kB, `index-YBSTmYxd.css` 52.24 kB, `guiProbe-Ec5GCOO9.js` 45.64 kB). **세 해시 모두 직전 회차와 동일** — 문서만 바꿨으므로 맞아. Tailwind 후보 오염도 없어(CSS 52.24 kB 그대로).
+  - `npm run build` 전에 `dist`를 먼저 지웠어(지난 회차의 `[safe-delete] … ETIMEDOUT` 함정을 겪지 않으려고). 이번엔 그 오류가 나오지 않았어.
+- 이 검증의 경계(중요):
+  - 이번 변경은 **문서 서술 정정**이라 실행 동작의 변화가 없고, 위 세 검사는 "문서만 바꿨으니 코드 기준선이 그대로다"를 확인한 것이야. **문서 정확성 자체를 자동 검증한 것은 아니야** — 근거는 위 `파일:줄` 대조야.
+  - 실제 `claude -p`, `python scripts/verify_*.py`, WebView, 데스크톱 빌드는 실행하지 않았어.
+  - 41행의 "등록한 인스턴스마다 상태 행이 하나씩"은 등록·백필 두 경로의 코드로 확인했고, 화면에서 행 개수를 세어 본 것은 아니야(WebView2 초기화 실패로 화면 관측 수단 없음).
+- 남은 문제:
+  1. **승인 대기(변동 없음)**: 실제 `claude -p` 1회로 stream-json 원문 캡처(외부 데이터 전송 + 계정 사용량). 이때까지 `parse_events`는 공개 문서 기준이야.
+  2. **새로 확인한 문서 불일치 1곳(이번엔 범위 유지로 남김)**: 99행 "`AgentAdapter`는 고정된 `codex`/`antigravity` ID, 연결 방식, 역할, 지원 capability를 분리해 제공해"도 어댑터가 4개인 지금은 불완전해. 같은 문단 뒤쪽이 OpenCode·Claude 등록을 설명하므로 문장 자체가 거짓은 아니지만 "고정된 codex/antigravity ID"로 읽히는 여지가 있어 다음 회차에 한 줄로 정리하면 좋아.
+  3. `store.rs`의 백필 SQL과 `registry.rs`의 등록 분기가 **여전히 두 곳에 따로** 있어(하나는 SQL `CASE`, 하나는 Rust `if`). 24회차에 술어를 같게 맞췄지만 한 함수로 합치지는 않았어 — 새 연결 종류가 생기면 다시 갈릴 수 있어.
+  4. `create_lead_session`이 `add_session`과 별도 INSERT 문을 가져 컬럼 목록이 중복이야(22회차 기록). `chat_sessions`에 컬럼이 추가되면 두 곳을 같이 고쳐야 해.
+  5. 화면 검증 공백 — WebView2 초기화 실패로 실제 화면에서 확인할 수단이 없어.
+  6. 1단계 잔여 4건(GUI 실행 확인, `tauri-plugin-single-instance` 내부 경합, 원본 세션 전역 잠금=승인 대기, 종료 중 거절의 WebView 재현)은 그대로 차단 상태야.
+- 다음 작업: (1) 승인 시 실제 `claude -p` 캡처로 `parse_events` 확정 — 3단계의 남은 근거를 닫는 유일한 길이야. 승인이 계속 없으면 (2) 99행 한 줄 정리 + `store.rs`/`registry.rs`의 상태 행 판정을 `registry`의 한 함수로 합치는 무동작 변경, 또는 (3) `create_lead_session`의 중복 INSERT를 공통 헬퍼로 합치는 무동작 변경. 4단계(세션별 Lead/Reviewer 선택)는 3단계의 실제 CLI 근거가 생긴 뒤로.
+- 실행 메모(이 환경): Rust 테스트는 `mvp-app/src-tauri/`에서 `.tools/cargo/bin/cargo.exe`에 `CARGO_HOME`/`RUSTUP_HOME`/`PATH`를 `.tools`로 맞춰 `run_in_background` + 로그로 돌릴 것(증분이라 2초 내 실행). `npm run build` 전에는 `rm -rf dist`로 비우면 `[safe-delete]` 함정을 피할 수 있어. `mvp-app/node_modules`·`mvp-app/evidence`는 메인 저장소로 향하는 junction이야.
+
+## 상태 행 백필이 등록이 획득한 연결을 그대로 쓰게 함 (2026-10-26, 3단계 안정화)
+
+- 선택한 작업: 지난 회차가 "다음 작업" 1순위로 남긴 `docs/ARCHITECTURE.md` 23·41행 정정 대신, 같은 조각(20회차 Claude 등록)이 남긴 **실제 코드 불일치**를 먼저 고쳤어. 근거는 이번에 코드를 대조하다 확인한 것 — `Store::open`의 상태 행 백필(`store.rs:148`)은 `connection_kind='opencode_cli_json'`만 `idle`로 판정하는데, 등록 경로(`registry.rs:225`)는 `connection_kind != 'not_configured'`면 `idle`이야. 그래서 **계약 위치(`~/.local/bin/claude.exe`)에 Lead로 등록해 `claude_code_cli`를 획득한 인스턴스**의 `agents` 행이 어떤 이유로 없으면, 재시작 후 백필이 그 행을 `unknown`/`실행 연결이 설정되지 않았습니다`로 되살려. 20회차에 `AgentsView`에서 없앤 것과 같은 종류의 거짓 표기("지원되는데 설정 필요")가 DB 계층에 남아 있던 셈이야.
+- 변경 파일 2개(코드 1 + 테스트 1): `mvp-app/src-tauri/src/store.rs`(백필 `CASE` 조건을 `connection_kind='not_configured'` 기준으로 뒤집고, 등록 경로와 같은 술어를 읽어야 하는 이유를 주석으로 남김), `mvp-app/src-tauri/src/registry.rs`(회귀 테스트 `a_backfilled_status_row_keeps_the_connection_the_registration_earned` 추가).
+- 동작 보존: 기존 행의 상태는 여전히 **덮어쓰지 않아**(`INSERT OR IGNORE`). `not_configured` 인스턴스는 이전과 똑같이 `unknown`/`실행 연결이 설정되지 않았습니다`야. 달라진 것은 **연결을 획득한 인스턴스의 행을 백필할 때** `idle`/`대기 중`이 된다는 것 하나뿐이고, 이는 등록 직후 값과 같아져 두 경로가 일치해. Blocking Delegation, `request_arch_review`, `archReview`/`latestUserRequirements` 구조적 분리, `tool_deliveries`, 종료 순서, Arch 타임아웃 120초(범위 30~600), 단일 worker, DB 스키마·`user_version=6`, 실행 파일 이름 `esh-chat-mvp4` 모두 그대로야. Tauri 명령·프런트·마이그레이션 변경은 없어.
+- 검증 (실제 출력):
+  - **red 먼저**: 테스트만 추가하고 돌린 결과 `test result: FAILED. 89 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.47s`, 실패 본문은 `assertion left == right failed / left: ("unknown", "실행 연결이 설정되지 않았습니다") / right: ("idle", "대기 중")`. 즉 결함이 실제로 존재함을 먼저 관측했어.
+  - 수정 후 `cargo test --bin esh-chat-mvp4` → `test result: ok. 90 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.41s` (기존 89 → 90, 순증 1). 신규 테스트 `ok`. Rust 경고는 기존 2건(`agents.rs`의 `Authenticated`·`Required`·`Error`, `Ready` 미생성 variant)뿐이고 새 경고는 없어.
+  - `node scripts/verify_external_threads.mjs` → `{"passed":true,"recordedRows":27,"scratchRowsHidden":9,"normalConversationsPreserved":true}`
+  - `npm run build` (`tsc -b && vite build`) → `✓ 298 modules transformed`, `✓ built in 3.87s` (`dist/assets/index-CXzmrCQ4.js` 433.84 kB, `index-YBSTmYxd.css` 52.24 kB, `guiProbe-Ec5GCOO9.js` 45.64 kB). **세 해시 모두 이전 회차와 동일** — Rust만 바꿨으므로 맞아. Tailwind 후보 오염도 없어.
+- 중간 실패 1건(환경, 코드 아님): 첫 `npm run build`가 `[safe-delete] 操作失败: spawnSync ...genie-trash\win32-x64.exe ETIMEDOUT` at `emptyDir`/`prepareOutDir`로 죽었어(exit 0으로 보이지만 빌드 실패). 지난 회차에 기록한 함정 그대로야. `dist`가 junction이 아니라 이 worktree의 실제 디렉터리임을 `dir /AL`로 확인한 뒤 `rm -rf dist` 후 재실행해 위 성공 결과를 얻었어.
+- 이 검증의 경계(중요):
+  - **이번 결함은 현재 등록 경로에서 관측된 사용자 피해가 아니야.** 등록은 `agent_instances` 행·`agents` 행·revision을 한 트랜잭션으로 쓰므로(`registry.rs:218-236`), 지금 빌드로 등록한 인스턴스는 행이 비어 있을 수 없어. 백필이 잘못된 값을 쓰는 조건은 "행이 다른 이유로 사라진 경우"(구빌드가 남긴 등록, 수동 삭제, 앞으로 생길 정리 버그)야. 즉 이번 수정은 **방어적 정합성**이고, 재현 테스트는 그 조건을 인위적으로 만들어 검사한 것이야.
+  - 실제 `claude -p`, `python scripts/verify_*.py`, WebView, 데스크톱 빌드는 실행하지 않았어.
+  - 신규 테스트는 `Store::open`을 두 번 호출해 백필 결과만 단언해. 백필이 도는 시점의 동시성이나 `snapshot` 소비자 쪽 표시는 검사하지 않았어.
+- 남은 문제:
+  1. **승인 대기(변동 없음)**: 실제 `claude -p` 1회로 stream-json 원문 캡처(외부 데이터 전송 + 계정 사용량). 이때까지 `parse_events`는 공개 문서 기준이야.
+  2. **ARCHITECTURE.md 23·41행 정정은 여전히 열려 있어**(이번에도 범위를 코드로 한정). 23행은 `agents.rs`를 "Codex Lead/Antigravity Reviewer 어댑터"로만 적어 OpenCode·Claude 어댑터가 빠졌고(실제 `registered()`는 4개: `agents.rs:177`), 41행 "실행 상태는 기존 앱 전역 `agents` 2개 행을 유지"는 등록마다 상태 행을 만드는 7회차 변경 이후 부정확해(실제로는 내장 2행 + 등록 수만큼, `registry.rs:221-233`).
+  3. `store.rs`의 백필 SQL과 `registry.rs`의 등록 분기가 **여전히 두 곳에 따로 적혀 있어**(하나는 SQL `CASE`, 하나는 Rust `if`). 이번에 술어를 같게 맞췄지만 한 곳으로 합치지는 않았어 — 새 연결 종류가 생기면 다시 갈릴 수 있어.
+  4. 화면 검증 공백 — WebView2 초기화 실패로 실제 화면에서 확인할 수단이 없어.
+  5. 1단계 잔여 4건(GUI 실행 확인, `tauri-plugin-single-instance` 내부 경합, 원본 세션 전역 잠금=승인 대기, 종료 중 거절의 WebView 재현)은 그대로 차단 상태야.
+- 다음 작업: (1) `docs/ARCHITECTURE.md` 23·41행 두 줄 정정 — 이제 다섯 회차째 미룬 항목이라 다음 회차에 먼저 처리할 것. 또는 (2) 승인 시 실제 `claude -p` 캡처로 `parse_events` 확정. 승인이 계속 없으면 (3) 백필 판정을 `registry`의 한 함수로 합쳐 두 경로가 구조적으로 갈릴 수 없게 만드는 무동작 변경. 4단계(세션별 Lead/Reviewer 선택)는 3단계의 실제 CLI 근거가 생긴 뒤로.
+- 실행 메모(이 환경): Rust 테스트는 `mvp-app/src-tauri/`에서 `.tools/cargo/bin/cargo.exe`에 `CARGO_HOME`/`RUSTUP_HOME`/`PATH`를 `.tools`로 맞춰 `run_in_background` + 로그로 돌릴 것(증분이라 7~12초). `mvp-app/node_modules`와 `mvp-app/evidence`는 **메인 저장소(`D:/프로젝트/ESH/mvp-app/...`)로 향하는 junction**이야 — 증거를 `evidence/`에 쓰면 메인 저장소 쪽에 쌓이고, `dist`만 이 worktree의 실제 디렉터리야.
+
+## ARCHITECTURE.md의 Claude 연결 서술 두 줄을 코드 사실로 정정 (2026-10-26, 1단계 문서 정합성)
+
+- 선택한 작업: 19~22회차가 "다음 작업"으로 네 번 미뤄 둔 `docs/ARCHITECTURE.md` 35행·99행 정정. 3단계 등록 조각(`9844058`)과 화면 배선 조각(`9d4b238`) 이후 두 문장이 사실과 달라져 있었어("Claude Code와 Gemini CLI는 등록 후보이며 실행 연결은 아직 미지원", "나머지 신규 인스턴스는 `not_configured`/`unsupported`"). 코드 변경 없이 **문서만** 고쳤어 — 요청 범위를 넘겨 리팩터링·기능 추가로 확대하지 않았어.
+- 변경 파일: `docs/ARCHITECTURE.md` 1개(2줄 치환, +2/-2). `git diff --stat` → `1 file changed, 2 insertions(+), 2 deletions(-)`.
+  - 35행: "Claude Code는 계약 위치(`~/.local/bin/claude.exe`)에 Lead로 등록하면 `claude_code_cli` 연결을 받아 세션 생성과 턴 전송 경로가 배선돼 있지만, 실제 `claude -p` 출력으로 이벤트 파서를 확인하지 않아 턴 실행 성공은 아직 검증되지 않았어(PROGRESS.md 참고). Gemini CLI는 등록 후보이며 실행 연결은 아직 미지원이야." — 등록·세션·턴 배선이 있다는 사실과 **실제 CLI 실행 미검증**을 한 문장 안에서 분리해 적었어. "지원됨"으로 읽히지 않게 파서 미확정을 같은 문장에 붙였어.
+  - 99행: "npm `opencode-ai/bin/opencode.exe`를 Lead로 등록하면 `opencode_cli_json`, `~/.local/bin/claude.exe`를 Lead로 등록하면 `claude_code_cli` 실행 연결을 제공하고, 그 밖의 신규 인스턴스는 `not_configured`/`unsupported`로 보존해." — 실제 판정 함수가 두 provider만 참이므로 "그 밖"으로 범위를 명시했어.
+- 정정 근거(코드에서 직접 확인한 줄, 문서 주장 ↔ 소스 대응):
+  - `src-tauri/src/agents.rs:13` `ConnectionKind::ClaudeCodeCli`, `:177` `registered()`가 4개(`&CODEX, &ANTIGRAVITY, &OPENCODE, &CLAUDE`), `:205` descriptor `id: "claude_code"` → "Claude Code가 등록 후보에만 머문다"는 서술은 거짓.
+  - `src-tauri/src/registry.rs:81-97` `recognized_install`이 `opencode`(npm shim)와 `claude_code`(`/.local/bin/claude.exe`)만 참, `connection_kind`는 `role == "lead"`이고 그 판정이 참일 때만 `opencode_cli_json`/`claude_code_cli`, 아니면 `not_configured` → 99행의 새 문장과 일치.
+  - `src-tauri/src/engine.rs:81` `"claude_code" => (target == "claude_code").then_some(TurnRoute::Claude)`, `:1088` `commit_lead_answer(..., "claude_code", ...)` → 턴 분기·마감 경로 존재.
+  - `src/providers.ts:36` `if (provider === 'claude_code') return 'claude_code'`, `:42` `isCliLeadProvider`에 `claude_code` 포함, `src/main.tsx:185` `turnTarget(provider)`, `:290` 세션 생성 드롭다운이 `isCliLeadProvider`로 필터 → 화면 배선 존재.
+  - `mvp-app/evidence/`에 claude 관련 산출물이 **없음**(`ls evidence/ | grep -i claude` → 결과 없음) → "실제 `claude -p` 출력으로 파서를 확인하지 않았다"는 서술의 근거.
+- 동작 보존: 코드·스키마·Tauri 명령·프런트를 한 줄도 바꾸지 않았어. Blocking Delegation, `request_arch_review`, `archReview`/`latestUserRequirements` 구조적 분리, `tool_deliveries`, 종료 순서, Arch 타임아웃 120초(범위 30~600), 단일 worker, DB 스키마·`user_version=6`, 실행 파일 이름 `esh-chat-mvp4` 모두 그대로야.
+- 검증 (실제 출력):
+  - `git diff --stat` → `docs/ARCHITECTURE.md | 4 ++--`, `1 file changed, 2 insertions(+), 2 deletions(-)`. 변경 파일이 문서 1개뿐임을 확인(코드 무변경).
+  - `cargo test --bin esh-chat-mvp4` (`.tools`의 cargo를 `mvp-app/src-tauri/`에서 직접 실행) → `test result: ok. 89 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.57s`. 직전 회차(89 passed, 1.68s)와 동일 — 코드를 바꾸지 않았으므로 기준선 유지 확인이야. 로그 `mvp-app/evidence/ct-r23.log`(gitignore 대상). 경고는 기존 2건(`agents.rs`의 `Authenticated`·`Required`·`Error`, `Ready` 미생성 variant)뿐.
+  - `node scripts/verify_external_threads.mjs` → `{"passed":true,"recordedRows":27,"scratchRowsHidden":9,"normalConversationsPreserved":true}`
+  - `npm run build` → `✓ 298 modules transformed`, `✓ built in 3.60s` (`dist/assets/index-CXzmrCQ4.js` 433.84 kB, `index-YBSTmYxd.css` 52.24 kB, `guiProbe-Ec5GCOO9.js` 45.64 kB). **세 해시 모두 직전 회차와 동일** — 문서만 바꿨으므로 맞아. Tailwind 후보 오염도 없어(CSS 52.24 kB 그대로).
+- 중간 실패 1건(정직하게 기록, 환경 문제): 첫 `npm run build`가 코드 오류가 아니라 **샌드박스 안전 삭제 shim 타임아웃**으로 죽었어 — `[safe-delete] 操作失败: spawnSync ...genie-trash\win32-x64.exe ETIMEDOUT` at `emptyDir`/`prepareOutDir`. vite가 기존 `dist/`를 비우려다 난 것이야. `dist`가 gitignore 대상 빌드 산출물임을 확인한 뒤 `rm -rf dist`로 직접 비우고 재실행해 위 성공 결과를 얻었어. **다음에도 `npm run build`가 `safe-delete` 오류로 죽으면 코드가 아니라 `dist/` 비우기 단계 문제로 보고 `dist`를 직접 지운 뒤 재실행할 것.**
+- 이 검증의 경계(중요):
+  - 이번 변경은 **문서 서술 정정**이라 실행 동작의 변화가 없고, 위 세 검사는 "문서만 바꿨으니 코드 기준선이 그대로다"를 확인한 것이야. **문서 정확성 자체를 자동 검증한 것은 아니야** — 근거는 위에 적은 `파일:줄` 대조야.
+  - 실제 `claude -p`, `python scripts/verify_*.py`, WebView, 데스크톱 빌드는 실행하지 않았어. 정정한 문장이 가리키는 "턴 실행 성공"은 여전히 **미검증**이고, 문서도 그렇게 적었어.
+- 남은 문제:
+  1. **승인 대기(변동 없음)**: 실제 `claude -p` 1회로 stream-json 원문 캡처(외부 데이터 전송 + 계정 사용량). 이때까지 `parse_events`는 공개 문서 기준이야.
+  2. **ARCHITECTURE.md에 아직 남은 불일치 2곳(이번엔 고치지 않음, 범위 유지)**: 23행 `agents.rs`를 "Codex Lead/Antigravity Reviewer 어댑터"로만 적어 OpenCode·Claude 어댑터가 빠져 있고, 41행 "실행 상태는 기존 앱 전역 `agents` 2개 행을 유지"는 등록마다 상태 행을 만드는 7회차 변경 이후 사용자 등록 수만큼 늘어날 수 있어 부정확해. 둘 다 같은 성격의 한 줄 정정이라 다음 회차에 함께 처리하면 정리돼.
+  3. 화면 검증 공백 — provider 배선과 store 변경을 실제 WebView에서 볼 수단이 없어(WebView2 초기화 실패).
+  4. `create_lead_session`이 `add_session`과 별도 INSERT 문을 가져 컬럼 목록이 중복이야(22회차 기록). `chat_sessions`에 컬럼이 추가되면 두 곳을 같이 고쳐야 해.
+  5. 1단계 잔여 4건(GUI 실행 확인, `tauri-plugin-single-instance` 내부 경합, 원본 세션 전역 잠금=승인 대기, 종료 중 거절의 WebView 재현)은 그대로 차단 상태야.
+- 다음 작업: (1) 위 남은 문제 2번의 ARCHITECTURE.md 23·41행 두 줄 정정(문서 불일치 마무리) 또는 (2) 승인 시 실제 `claude -p` 캡처로 `parse_events` 확정. 승인이 계속 없으면 (3) `create_lead_session`의 중복 INSERT를 공통 헬퍼로 합치는 무동작 변경. 4단계(세션별 Lead/Reviewer 선택)는 3단계의 실제 CLI 근거가 생긴 뒤로.
+- 실행 메모(이 환경): `npm run build`가 `[safe-delete] ... ETIMEDOUT`으로 죽으면 `dist/`를 직접 지우고 재실행. Rust 테스트는 `mvp-app/src-tauri/`에서 `.tools/cargo/bin/cargo.exe`에 `CARGO_HOME`/`RUSTUP_HOME`/`PATH`를 `.tools`로 맞춰 `run_in_background` + 로그 파일로 돌릴 것(이번엔 증분이라 1분 내).
+
+## CLI Lead 세션 행을 한 트랜잭션으로 완성 (2026-10-26, 3단계 여덟 번째 조각)
+
+- 선택한 작업: 19회차가 남긴 미해결 3번 "`create_lead_session`의 두 커밋". OpenCode·Claude 세션을 만들 때 `add_session`이 **자기 트랜잭션으로 먼저 커밋**하고 그 뒤에 `provider`·`agent_instance_id`를 UPDATE했어. 그 사이에 다른 스레드가 snapshot을 읽으면 **Lead 등록이 소유한 세션이 `provider='codex'`인 행으로 보이고**, UPDATE가 실패하면 그 `codex` 행이 유령 세션으로 DB에 남았어. 3단계에서 Claude 세션이 화면에서 도달 가능해진 뒤로는 이 경로가 실제로 쓰이므로 먼저 닫았어.
+- 변경 파일: `mvp-app/src-tauri/src/workspace.rs` 1개.
+  - `create_lead_session`이 `add_session`을 부르지 않고 **`INSERT INTO chat_sessions(... provider, agent_instance_id ...)` 한 문장 + `meta.revision` 증가를 같은 트랜잭션**에서 수행해. 이제 세션 행이 처음 관측되는 순간부터 provider와 소유 등록이 확정돼 있어. `changed != 1` 검사는 "행이 없을 수 있다"는 전제 자체가 사라져 필요 없어졌고, 실패 시 부분 행이 남지 않아.
+  - `add_session`은 **손대지 않았어**. `create_session`(등록 없는 Codex 기본 세션)과 `import_codex_session`(copy/resume)은 여전히 `add_session`을 써. `add_session`의 중복 방지는 원래도 `(room_id, source_thread_id, mode)` 부분 유니크 인덱스에만 걸려 있고 이름 중복 제약은 없어서, Lead 경로가 그 검사를 잃는 것은 아니야(이름 중복은 이전에도 막히지 않았어). 실패 문구는 `add_session`과 같은 문자열로 맞췄어.
+- 동작 보존: 만들어지는 세션의 최종 값(`provider`, `agent_instance_id`, `mode='new'`, `thread_id=None`, 빈 `session_id`, `model`/`reasoning_effort` NULL)은 이전과 같고, 반환값과 저장 행이 일치해. 달라진 것은 (1) 같은 세션 생성에 대해 `meta.revision`이 **2가 아니라 1** 오른다는 것, (2) 그 사이 상태(`codex` 행)가 관측되지 않는다는 것, (3) 실패 시 부분 행이 남지 않는다는 것이야. Blocking Delegation, `request_arch_review`, `archReview`/`latestUserRequirements` 구조적 분리, `tool_deliveries`, 종료 순서, Arch 타임아웃 120초(범위 30~600), 단일 worker, DB 스키마·`user_version=6`, 실행 파일 이름 `esh-chat-mvp4` 모두 그대로야. 새 Tauri 명령·스키마 변경·프런트 변경은 없어.
+- 검증 (실제 출력):
+  - `cargo test --bin esh-chat-mvp4` (`mvp-app/src-tauri/`에서 프로젝트 상위 `.tools`의 cargo 직접 실행) → `test result: ok. 89 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.68s` (기존 88 → 89, 순증 1). 신규 `workspace::tests::a_lead_session_is_one_published_change_with_no_placeholder_row` → `ok`. Rust 경고는 기존 2건(`agents.rs`의 `Authenticated`·`Required`·`Error`, `Ready` 미생성 variant)뿐이고 새 경고는 없어.
+  - 기준선 먼저 측정: 변경 전 같은 트리에서 `test result: ok. 88 passed; 0 failed` (`mvp-app/evidence/ct-baseline-r22.log`). 변경 후 로그는 `mvp-app/evidence/ct-r22.log`(둘 다 gitignore 대상).
+  - `node scripts/verify_external_threads.mjs` → `{"passed":true,"recordedRows":27,"scratchRowsHidden":9,"normalConversationsPreserved":true}` (변경 전후 동일)
+  - `npm run build` (`tsc -b && vite build`) → `✓ 298 modules transformed`, `✓ built in 13.68s` (`dist/assets/index-CXzmrCQ4.js` 433.84 kB, `index-YBSTmYxd.css` 52.24 kB, `guiProbe-Ec5GCOO9.js` 45.64 kB). **JS·CSS 해시 모두 이전 회차와 동일** — Rust만 바꿨으므로 맞아. Tailwind 후보 오염도 없어.
+- 신규 테스트가 실제로 확인한 것: (1) OpenCode Lead 등록으로 세션을 만들면 `meta.revision`이 **정확히 1** 오른다(이전 구현은 2), (2) 저장된 행이 `provider='opencode'`·`agent_instance_id=등록 ID`·`mode='new'`·`thread_id=None`으로 **처음부터** 완성돼 있다, (3) 존재하지 않는 룸으로 만들면 `세션 추가 실패`로 거절되고 **revision도 세션 수(행 개수)도 변하지 않는다**(부분 행 없음).
+- 이 검증의 경계(중요):
+  - **"두 커밋 사이에 읽는 소비자가 있다"는 것을 직접 재현한 검증은 아니야.** 단위 테스트는 한 스레드에서 결과 상태만 확인했어(리비전 1회, 행 완성, 실패 시 무변경). 경합 자체는 트랜잭션 경계로 없앤 것이고 관측으로 증명한 것은 아니야.
+  - `create_session` Tauri 명령은 `AppHandle`(`Engine`) 의존이라 여전히 단위 테스트로 호출하지 못했어. 검사한 것은 그 명령이 부르는 store 함수야.
+  - 실제 `claude -p`, `python scripts/verify_*.py`, WebView, 데스크톱 빌드는 실행하지 않았어(변경이 Rust store 계층이고 실행 중인 앱을 건드리지 않으려고).
+- 남은 문제:
+  1. **승인 대기(변동 없음)**: 실제 `claude -p` 1회로 stream-json 원문 캡처(외부 데이터 전송 + 계정 사용량). 이때까지 `parse_events`는 공개 문서 기준이야.
+  2. **문서 불일치(계속 열림, 이번에도 손대지 않음)**: `docs/ARCHITECTURE.md` 35행("Claude Code와 Gemini CLI는 … 실행 연결은 아직 미지원")과 99행("나머지 신규 인스턴스는 `not_configured`/`unsupported`")이 등록 조각(9844058)과 배선 조각(9d4b238) 이후 사실과 달라. 이번 회차는 store 계층만 고쳤고 문서 확장은 범위 밖이라 그대로 뒀어.
+  3. 화면 검증 공백 — provider 배선과 이번 store 변경을 실제 WebView에서 볼 수단이 없어(WebView2 초기화 실패).
+  4. `create_lead_session`은 이제 `add_session`과 **별도 INSERT 문**을 갖게 됐어(컬럼 목록 중복). `add_session`이 새 컬럼을 얻으면 두 곳을 같이 고쳐야 해. 지금은 문장 하나라 감수했고, 필요하면 나중에 공통 헬퍼로 합칠 수 있어.
+  5. 1단계 잔여 4건(GUI 실행 확인, `tauri-plugin-single-instance` 내부 경합, 원본 세션 전역 잠금=승인 대기, 종료 중 거절의 WebView 재현)은 그대로 차단 상태야.
+- 다음 작업: (1) `docs/ARCHITECTURE.md` 35·99행 두 줄 정정 — 이제 세 회차째 미뤄 둔 항목이라 다음 회차에 먼저 처리하는 편이 좋아. 또는 (2) 승인 시 실제 `claude -p` 캡처로 `parse_events` 확정. 승인이 계속 없으면 (3) `guiProbe.ts`에 턴 전송 없는 provider 배선 점검 모드. 4단계(세션별 Lead/Reviewer 선택)는 3단계의 실제 CLI 근거가 생긴 뒤로.
+- 실행 메모(이 환경): Rust 테스트는 `mvp-app/src-tauri/`에서 `.tools/cargo/bin/cargo.exe`에 `CARGO_HOME`/`RUSTUP_HOME`/`PATH`를 `.tools`로 맞춰 `run_in_background` + 로그 파일로 돌릴 것. 이번 회차는 증분 컴파일이 짧아 1~2분 안에 끝났어(전체 재컴파일은 12~15분).
+
+## 화면의 메시지 대상과 Lead UI를 세션 provider에서 정함 (2026-10-26, 3단계 일곱 번째 조각)
+
+- 선택한 작업: 3단계(추가 CLI 어댑터)의 다음 조각으로 지난 회차가 남긴 (d) "화면 배선". 그때까지 `main.tsx`는 전송 대상을 `isOpenCode ? 'opencode' : 'codex'`로 정해서 **Claude Code 세션은 `target='codex'`로 보내져 `turn_route`가 거절**했고, 세션 생성 드롭다운은 `provider === 'opencode'`만 나열해 화면에서 Claude Lead를 고를 수 없었고, `main` 메시지 필터에 `claude_code`가 없어 답변이 와도 목록에 뜨지 않았어.
+- 변경 파일 4개(그중 1개는 신규 검증 스크립트): `mvp-app/src/providers.ts`(신규), `mvp-app/src/main.tsx`, `mvp-app/src/types.ts`, `mvp-app/scripts/verify_providers.mjs`(신규).
+  - `providers.ts`: provider 판정을 한 곳에 모았어. `turnTarget(provider)`는 `codex`/`opencode`/`claude_code`만 대상 문자열을 돌려주고 **그 밖은 `null`**이야 — 예전처럼 `codex`로 추측하지 않아. `isCliLeadProvider`(세션을 만들 수 있는 CLI Lead), `supportsManualCompaction`·`supportsCodexModelSettings`(Codex 전용 조작), `providerLabel`(표시 이름).
+  - `main.tsx`: `send`가 `turnTarget(provider)`를 쓰고 `null`이면 요청을 보내지 않고 오류 배너로 알려. 세션 생성 드롭다운은 `activeRole === 'lead' && installation === 'installed' && isCliLeadProvider(provider)`로 모든 CLI Lead를 나열하고 라벨은 `providerLabel`로 만들어. `main` 대화 필터·답변 구분선·말풍선 제목·빈 화면 문구·`aria-label`/`placeholder`가 provider를 따라가고, 모델 선택·추론 강도·`ContextStatus`(수동 압축)는 `supportsCodexModelSettings`/`supportsManualCompaction`로 **Codex 세션에만** 붙어. OpenCode 모델 선택 UI는 그대로야.
+  - `types.ts`: `Message.speaker`와 `Session.provider` 유니온에 `'claude_code'` 추가(백엔드는 이미 그 값을 저장하고 있었어).
+- 동작 보존: Codex 세션은 `target='codex'`, OpenCode 세션은 `target='opencode'`로 이전과 같고, 두 provider의 모델·압축 UI도 이전과 같은 자리에 붙어. 바뀐 것은 (1) `claude_code` 세션이 자기 target으로 보내지고 답변이 대화 목록에 표시된다는 것, (2) 드롭다운에 Claude Lead가 나온다는 것, (3) **분기가 없는 provider(`gemini_cli`·`mock_agent` 등) 세션이면 전송을 시도하지 않고 화면에서 먼저 거절**한다는 것(백엔드도 같은 요청을 거절하므로 살아 있는 동작 차이는 없어). Blocking Delegation, `request_arch_review`, `archReview`/`latestUserRequirements` 구조적 분리, `tool_deliveries`, 종료 순서, Arch 타임아웃 120초(범위 30~600), 단일 worker, DB 스키마·`user_version=6`, 실행 파일 이름 `esh-chat-mvp4` 모두 그대로야. Rust·Tauri 명령·DB 쓰기는 한 줄도 바꾸지 않았어.
+- 검증 (실제 출력):
+  - `node scripts/verify_providers.mjs` → `{"passed":true,"targets":3,"refusedTargets":6,"codexOnlyControls":2,"wiredCallSites":5}` (신규). `providers.ts`를 `typescript`로 트랜스파일해 직접 호출하고, `main.tsx`·`types.ts` 소스를 정적으로 검사해 하드코딩 분기가 되살아나지 않게 막아.
+  - `node scripts/verify_external_threads.mjs` → `{"passed":true,"recordedRows":27,"scratchRowsHidden":9,"normalConversationsPreserved":true}` (프런트 변경이 이 분류에 영향 없음 확인)
+  - `npm run build` (`tsc -b && vite build`) → `✓ 298 modules transformed`, `✓ built in 9.61s` (`dist/assets/index-CXzmrCQ4.js` 433.84 kB, `index-YBSTmYxd.css` 52.24 kB, `guiProbe-Ec5GCOO9.js` 45.64 kB). **CSS 해시는 이전과 동일**하고 JS만 바뀐 것이 이번 변경의 범위와 맞아.
+  - `cargo test --bin esh-chat-mvp4` → `test result: ok. 88 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.53s` (Rust는 손대지 않아 기준선 유지 확인, 88 그대로). 경고는 기존 2건(`agents.rs`의 `Authenticated`·`Required`·`Error`, `Ready` 미생성 variant)뿐.
+- **중간 발견 1건(정직하게 기록)**: 첫 `npm run build`에서 CSS가 `index-hNmQT7Zy.css` 53.44 kB로 **1.2 kB 늘었어**(CSS는 건드리지 않았는데). 원인은 Tailwind v4 스캐너가 새 검증 스크립트 안의 주석·메시지에 있던 낱말 `filter`를 유틸리티 후보로 읽어 `.filter{…}` 규칙을 생성한 것이야. 변경을 stash하고 같은 트리로 다시 빌드해 기준선이 52.24 kB(`index-YBSTmYxd.css`)임을 확인한 뒤 스크립트 문구를 `narrow`로 바꿨고, CSS 해시가 기준선으로 돌아왔어. **교훈: `mvp-app/` 안에 두는 스크립트·주석의 낱말도 Tailwind 후보로 잡혀 CSS 번들이 변한다.** 검증 스크립트를 추가할 때 CSS 해시가 바뀌면 먼저 이 원인을 의심할 것.
+- 이 검증의 경계(중요):
+  - **실제 화면을 보지 못했어.** 이 환경은 WebView2 초기화가 실패해(8회차 기록) GUI probe를 돌릴 수 없어. 이번 검증은 (1) 순수 함수 단언, (2) 소스 정적 검사, (3) `tsc -b` 타입 검사, (4) `vite build` 성공까지야. "드롭다운에 Claude가 보인다", "전송이 `claude_code`로 나간다", "답변이 목록에 뜬다"는 **화면에서 관측한 것이 아니야**. `python scripts/verify_*.py`도 실행하지 않았어(실행 중인 앱·실제 CLI 사용량).
+  - `npm run build`는 프런트만 빌드해. 데스크톱 exe(`build:desktop`)는 다시 빌드하지 않았어 — 지금 `dist`가 최신이므로 다음 데스크톱 빌드에 포함될 뿐이야.
+  - **이번 조각으로 Claude 세션 경로가 처음 화면에서 도달 가능해졌어.** 계약 위치(`~/.local/bin/claude.exe`)에 Lead로 등록되어 있으면 세션을 만들고 메시지를 보낼 수 있어. 그런데 `parse_events`는 여전히 실제 `claude -p`로 확인되지 않은 **공개 문서 기준**이라, 그 상태로 보내면 턴이 실패하거나 빈 답이 될 수 있어(도구 호출·세션 ID 불일치는 거절하도록 되어 있고 stderr 본문은 전달하지 않아). 실제 CLI 캡처는 여전히 **승인 대기**야.
+- 남은 문제:
+  1. **승인 대기**: 실제 `claude -p` 1회로 stream-json 원문 캡처(외부 데이터 전송 + 계정 사용량). 이때까지 파서·턴 형태는 미확정이고, 이제는 화면에서도 그 경로를 호출할 수 있어 우선순위가 더 높아졌어.
+  2. **문서 불일치(계속 열림)**: `docs/ARCHITECTURE.md` 35행("Claude Code와 Gemini CLI는 … 실행 연결은 아직 미지원")과 99행("나머지 신규 인스턴스는 `not_configured`/`unsupported`")이 등록 조각(9844058)과 이번 조각으로 사실과 달라졌어. 이번에도 PROGRESS 기록만 하고 ARCHITECTURE는 건드리지 않았어(요청 범위 밖 문서 확장 금지). 다음 회차에 두 줄만 정정하면 정리돼.
+  3. **화면 검증 공백**: provider 배선을 실제 WebView에서 확인할 수단이 없어. `guiProbe.ts`에 provider 점검 모드를 추가하면 사용자가 한 번 실행해 확인할 수 있지만, 그 모드가 실제 턴을 보내면 CLI 사용량이 발생해 승인 문제가 따라.
+  4. Claude 세션에는 모델·추론 강도·수동 압축 UI가 없어(어댑터가 `model_catalog`·`context_compaction`을 광고하지 않아 의도된 것). `claude_turn`은 `session.model`을 그대로 넘기므로 DB에 값이 있으면 `--model`로 전달돼 — 화면에서 설정할 방법은 없어.
+  5. 1단계 잔여 4건(GUI 실행 확인, `tauri-plugin-single-instance` 내부 경합, 원본 세션 전역 잠금=승인 대기, 종료 중 거절의 WebView 재현)은 그대로 차단 상태야.
+- 다음 작업: (1) `docs/ARCHITECTURE.md` 35·99행 두 줄 정정(이번 조각이 만든 불일치 마무리), 또는 (2) 승인 시 실제 `claude -p` 캡처로 `parse_events` 확정. 승인이 계속 없으면 (3) `guiProbe.ts`에 provider 배선 점검 모드(턴 전송 없이 드롭다운·target 계산만 확인)를 넣어 사용자가 WebView에서 1회 실행하는 쪽이 안전해. 4단계(세션별 Lead/Reviewer 선택)는 3단계의 실제 CLI 근거가 생긴 뒤로 미루는 편이 좋아.
+- 실행 메모(이 환경): `npm run build`는 Bash에서 그대로 돌아가(9~11초). Rust 테스트는 `mvp-app/src-tauri/`에서 `.tools/cargo/bin/cargo.exe`에 `CARGO_HOME`/`RUSTUP_HOME`/`PATH`를 `.tools`로 맞춰 `run_in_background` + 로그 파일로 돌릴 것. Node 검증 스크립트는 `mvp-app/node_modules`의 `typescript`를 쓰므로 `mvp-app/`에서 실행해야 해.
+
+## Claude Code 연결을 등록에 부여하고 턴 해석을 `active_role`로 좁힘 (2026-10-26, 3단계 여섯 번째 조각)
+
+- 선택한 작업: 3단계(추가 CLI 어댑터)의 다음 조각으로 지난 회차가 남긴 (c) "`agents.rs`+`registry.rs` 등록 조각". 그때까지 `register_agent_instance`는 OpenCode npm shim만 `connection_kind`를 부여하고 나머지는 `not_configured`로 두었고, `ClaudeCodeAdapter`가 없어 `claude_runner`가 `role`을 봐야 했다. 이번에 등록이 Claude Code 연결을 받고, 어댑터가 그 연결을 광고하며, 턴 해석이 `role` 대신 `active_role`을 보도록 **한 조각에서** 맞췄어.
+- 변경 파일 6개(그중 3개는 한 줄 수준): `mvp-app/src-tauri/src/agents.rs`, `mvp-app/src-tauri/src/registry.rs`, `mvp-app/src-tauri/src/engine.rs`, `mvp-app/src-tauri/src/mock_agent.rs`(테스트 인덱스), `mvp-app/src-tauri/src/claude.rs`(모듈 주석만), `mvp-app/src/AgentsView.tsx`(연결 방식 라벨 맵).
+  - `agents.rs`: `ConnectionKind::ClaudeCodeCli` 추가, `ClaudeCodeAdapter`/`CLAUDE` + descriptor(id `claude_code`, Lead, `lead_conversation`·`persistent_session`·`cancellation`만 true, `streaming`·`model_catalog`·`context_compaction`·`tool_call_bridge`·`delegated_review` false), `registered()`를 4개로 확장. `probe_install`에 Claude 분기(`ESH_CLAUDE_BIN` → `~/.local/bin/claude.exe`)를 넣고, 그 전까지 Claude가 **agy 경로로 점검되던** 문제를 없앴어(이전 `else` 분기가 `ESH_AGY_BIN`/`agy.exe`를 반환).
+  - `registry.rs`: `recognized_install(provider, path)` 하나로 "이 실행 파일이 계약을 쓴 그 설치 위치인가"를 판정하고, `connection_kind()`가 같은 판정으로 `opencode_cli_json`/`claude_code_cli`를 부여해. `active_role`의 기존 OpenCode 하드코딩 가드도 같은 함수로 교체. 상태 행은 `connection != not_configured`면 `idle`, 아니면 기존처럼 `unknown`+`실행 연결이 설정되지 않았습니다`.
+  - `engine.rs`: `claude_runner`의 검사를 `instance.role != "lead"` → `instance.active_role != Some("lead")`로 좁혀 OpenCode 턴과 같은 규칙으로 맞췄어. 이제 계약 위치가 아닌 곳에 등록한 Lead는 `not_configured`로 남아 턴이 거절돼.
+  - `AgentsView.tsx`: `connection === 'opencode_cli_json' ? 'OpenCode CLI · JSON' : '설정 필요'` 삼항을 `connectionLabels` 맵으로 바꿔, 지원되는 Claude 등록이 상세 화면에서 **`지원: 지원`인데 `연결 방식: 설정 필요`로 표시되던** 모순을 없앴어.
+  - `mock_agent.rs`: `registered()` 크기가 3→4가 되어 `production.len()`과 `test_registry[3]` 인덱스만 고쳤어(동작 변경 없음).
+- **`support` 표기의 의미(중요)**: 이제 계약 위치(`~/.local/bin/claude.exe`)에 Lead로 등록하면 `connection_kind=claude_code_cli`, `active_role=lead`, `support=supported`, `availability=unknown`이 돼. 이는 "Adapter ID·연결 방식·capability가 일치한다"는 어댑터 수준 표기야(ARCHITECTURE.md의 활성 역할 정의). 인증·모델 사용 가능 여부는 파일 점검으로 알 수 없어 `unknown`으로 남겼고, **화면에서 Claude 세션을 만들 수는 아직 없어**(아래 남은 문제 2번).
+- 동작 보존: Codex·Antigravity·OpenCode 등록의 판정·문구·상태 행은 같아(OpenCode는 같은 판정 함수로 옮겨 쓴 것뿐). 계약 위치가 아닌 곳에 등록한 Claude Lead는 이전과 똑같이 `not_configured`/`unsupported`/`unknown`이고 세션도 만들어지지 않아. Blocking Delegation, `request_arch_review`, `archReview`/`latestUserRequirements` 구조적 분리, `tool_deliveries`, 종료 순서, Arch 타임아웃 120초(범위 30~600), 단일 worker, DB 스키마·`user_version=6`, 실행 파일 이름 `esh-chat-mvp4` 모두 그대로야. 새 Tauri 명령·스키마 변경은 없어(기존 `agent_instances.connection_kind` 값 집합에 `claude_code_cli`가 추가될 뿐).
+- 검증 (실제 출력):
+  - `cargo test --bin esh-chat-mvp4` (프로젝트 상위 `.tools`의 cargo를 `src-tauri/`에서 직접 실행) → `test result: ok. 88 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.66s` (기존 84 → 88, 순증 4). 신규: `agents::tests::claude_code_is_advertised_as_a_conversation_only_lead`, `registry::tests::a_claude_registration_at_the_installed_layout_becomes_a_runnable_lead`, `registry::tests::a_claude_registration_outside_the_installed_layout_stays_unsupported`, `engine::claude_runner_tests::a_lead_registration_outside_the_claimed_layout_never_runs` — 모두 `ok`. 수정: `mock_agent::tests::mock_is_a_distinct_test_only_registry_entry_and_is_hidden_by_default`(인덱스), `engine::claude_runner_tests::*` 2개(픽스처 경로를 `.local/bin/claude.exe`로) — 모두 `ok`. Rust 경고는 기존 2건(`agents.rs`의 `Authenticated`·`Required`·`Error`, `Ready` 미생성 variant)뿐이고 새 경고는 없어.
+  - `node scripts/verify_external_threads.mjs` → `{"passed":true,"recordedRows":27,"scratchRowsHidden":9,"normalConversationsPreserved":true}`
+  - `npm run build` → `✓ built in 11.52s` (`dist/assets/index-BPKOmmcN.js` 433.34 kB, `index-YBSTmYxd.css` 52.24 kB, `guiProbe-BtYocZq_.js` 45.64 kB — AgentsView를 건드려 index 해시가 바뀐 것이 맞아. CSS 해시는 동일)
+  - 중간 실패 1건(정직하게 기록): 첫 컴파일에서 `registry.rs` 테스트가 `unwrap_err()`에 `Session: Debug`를 요구해 `error[E0277]`로 실패(exit 101). `unwrap_err()` → `.err().expect("no connection")`으로 고친 뒤 위 결과를 얻었어. 그 실패 로그는 `mvp-app/evidence/ct-bash.log`(gitignore 대상), 성공 로그는 `ct-bash2.log`에 있어.
+- 신규 테스트가 실제로 확인한 것: (1) 계약 위치에 Lead로 등록하면 `connection=claude_code_cli`·`active_role=lead`·`support=supported`·`authentication=unknown`·`availability=unknown`이고 상태 행이 `idle/대기 중`이며, 그 등록으로 `create_agent_session`이 `provider='claude_code'` 세션을 만들고 재시작 후에도 유지된다는 것, (2) 같은 파일명이라도 다른 디렉터리(`<tmp>/bin/claude.exe`)에 등록하면 `not_configured`/`unsupported`/`unavailable`/`unknown` 행으로 남고 세션이 만들어지지 않는다는 것, (3) `claude_runner`가 계약 위치 밖의 Lead 등록을 `실행 가능하지 않습니다`로 거절한다는 것(이전에는 `role`만 보고 통과했음), (4) Claude 어댑터가 `streaming`·`tool_call_bridge`·`model_catalog`·`context_compaction`을 광고하지 않고 연결 라벨이 다른 세 CLI와 구별된다는 것.
+- 이 검증의 경계(중요):
+  - **실제 `claude -p`는 여전히 한 번도 실행하지 않았어.** 등록·세션·턴 경로는 준비됐지만 `parse_events`는 공개 문서 기준 그대로야. 실제 CLI 캡처는 **승인 대기**.
+  - **화면에서 Claude 세션을 만들 수 없어.** `main.tsx`의 세션 생성 드롭다운은 `provider === 'opencode' && activeRole === 'lead'`만 나열하고, 전송도 `target: isOpenCode ? 'opencode' : 'codex'`야. 즉 Claude 세션은 Tauri 명령으로만 만들 수 있고, 만들더라도 화면 전송은 `target='codex'`라 `turn_route`가 거절해. 이 배선은 4단계(세션별 Lead 선택) 또는 다음 조각의 일이야.
+  - `Engine`이 `AppHandle`을 들고 있어 `submit`·`claude_turn` 자체는 단위 테스트로 호출하지 못했어. 테스트는 그 함수들이 읽는 등록·세션 행과 판정 함수(`claude_runner`)를 실제 SQLite로 검사한 것이고, 배선은 컴파일·코드 확인으로만 검증했어.
+  - `python scripts/verify_*.py`, WebView, 데스크톱 빌드는 실행하지 않았어(변경이 등록 판정과 라벨이고 실행 중인 앱을 건드리지 않으려고).
+- 남은 문제:
+  1. **승인 대기**: 실제 `claude -p` 1회로 stream-json 원문 캡처(외부 데이터 전송 + 계정 사용량). 이때까지 파서·턴 형태는 미확정.
+  2. **UI 배선 없음**: 세션 생성 드롭다운에 Claude Lead를 넣고, 전송 target을 세션 provider에서 정하고, `isOpenCode` 기준으로 갈라진 모델 선택·압축 UI를 provider 기준으로 정리해야 해. 그 전까지 Claude는 "등록·명령 경로만 있는" 상태야.
+  3. **문서 불일치(기록)**: `docs/ARCHITECTURE.md` 35행("Claude Code와 Gemini CLI는 … 실행 연결은 아직 미지원")과 99행("나머지 신규 인스턴스는 `not_configured`/`unsupported`")이 이번 변경으로 사실과 달라졌어. 이번 회차는 PROGRESS 기록만 하고 ARCHITECTURE는 건드리지 않았어(요청 범위 밖 문서 확장 금지).
+  4. 계약 위치를 `~/.local/bin/claude.exe` 하나로 고정했어. npm 등 다른 설치 위치의 `claude.exe`는 `not_configured`로 남아 지원 표기가 되지 않아(안전한 기본값이지만 실제 사용자 환경에 따라 false negative).
+  5. 도구 정책 미확정 — `--permission-mode plan`이 대화 전용 계약을 실제로 지키는지 미검증.
+  6. 1단계 잔여 4건(GUI 실행 확인, `tauri-plugin-single-instance` 내부 경합, 원본 세션 전역 잠금=승인 대기, 종료 중 거절의 WebView 재현)은 그대로 차단 상태야.
+- 다음 작업: (d) 화면 배선 — 세션 생성 드롭다운에 Claude Lead 추가 + 전송 target을 세션 provider로 + `isOpenCode`로 갈린 UI를 provider 기준으로. 승인을 받으면 그 전에 실제 `claude -p` 캡처로 `parse_events`를 확정하는 편이 좋아.
+- 실행 메모(이 환경): cargo는 **`mvp-app/src-tauri/`에서** 실행하고(`mvp-app/`에는 `Cargo.toml`이 없음), Bash 도구에서 바로 돌리면 출력 없이 SIGTERM으로 죽으니 `run_in_background`로 띄워 로그 파일로 받을 것. 이번 회차 컴파일은 12~15분 걸렸어(이전 회차의 2~3초는 테스트 실행 시간일 뿐). PowerShell 도구의 `Start-Process`는 이 세션의 `HTTPS_PROXY`/`https_proxy` 중복 키 때문에 실패해.
+
+## 세션 종류를 등록에서 고르게 하고 Claude 세션 경로 추가 (2026-10-26, 3단계 다섯 번째 조각)
+
+- 선택한 작업: 3단계(추가 CLI 어댑터)의 다음 조각으로 지난 회차가 남긴 (b) "`workspace.rs`의 `create_claude_session` + `main.rs` `create_session`의 provider 분기". `create_session` 명령이 `agent_instance_id`를 **무조건** `create_opencode_session`으로 보내고 있어서, Claude Code 등록으로 세션을 만들면 OpenCode 문구로 실패했고 세션 종류가 한 provider에 고정돼 있었어.
+- **이번 실행의 특이 사항(먼저 밝힘)**: 시작 시점에 `.automation.lock`이 `2026-10-26 00:58:55`로 남아 있었고(약 17시간 28분 경과, 90분 초과) 작업 트리에 커밋되지 않은 변경 3파일이 있었어. 즉 00:58에 시작한 회차가 검증·커밋 전에 중단된 상태야. 그 변경이 바로 이번에 선택한 (b) 작업과 일치해(내용을 읽어 확인) **버리지 않고 이어받아** 검증·수정·커밋했어. 이전 회차가 이미 작성한 코드라는 점을 기록해 둬 — 이번 회차가 처음부터 작성한 것이 아니야.
+- 변경 파일: `mvp-app/src-tauri/src/workspace.rs`, `mvp-app/src-tauri/src/main.rs`, `mvp-app/src-tauri/src/claude.rs`(모듈 주석만).
+  - `create_agent_session(room_id, value, instance_id)` 추가 — 등록 행의 `provider`를 읽어 `opencode`는 `create_opencode_session`, `claude_code`는 `create_claude_session`으로 보내고 그 밖(`codex`·`antigravity`·`mock_agent`)은 `이 에이전트로는 대화 세션을 만들 수 없습니다`로 거절해. `create_session` 명령은 이 함수 하나만 호출해.
+  - `create_claude_session(room_id, value, instance_id)` 추가 — `provider == "claude_code"`, `role == "lead"`, `installation == "installed"`를 확인하고 **`connection == claude::CONNECTION_KIND`까지** 확인해. `active_role`이 아니라 `connection`을 보는 이유는 등록 조각이 아직 없어 `active_role`이 `None`이기 때문이야(지난 회차의 `claude_runner`가 `role`을 보는 것과 같은 이유). 지금 `register_agent_instance`는 `not_configured`만 쓰므로 **어떤 등록도 이 경로를 통과하지 못하고**, 어댑터가 `claude_code_cli`를 부여하는 순간 이 경로가 스스로 열려.
+  - `create_lead_session(room_id, value, instance_id, provider)` 추출 — 두 CLI Lead가 공유하는 쓰기야. `add_session` 뒤 `provider`·`agent_instance_id`를 **한 문장**으로 쓰고 같은 트랜잭션에서 `meta.revision`을 올리며, 갱신 행이 1이 아니면 오류로 롤백해. 이전 `create_opencode_session`은 검사 없는 `execute` 두 번이었어.
+  - `claude.rs`는 모듈 주석만 갱신 — "세션 경로가 생겼으나 등록이 없어 도달 불가"로 사실을 맞췄어. 계약·파서·`run` 시그니처·`CONNECTION_KIND` 값은 그대로야.
+- 동작 보존: OpenCode 세션 생성은 검사·최종 행 값이 같고(쓰기가 트랜잭션 + `changed != 1` 가드로 바뀐 것만 다름), `create_session`에서 `agent_instance_id` 없이 부르는 경로(Codex 기본 세션)는 그대로야. Claude 등록으로 세션을 만들려 하면 이전에는 `실행 가능한 OpenCode Lead 등록이 아닙니다`, 지금은 `Claude Code 실행 연결이 설정되지 않은 등록입니다`로 **둘 다 실패**하고 세션은 만들어지지 않아 — 살아 있는 동작 변화는 없어. `support`/`active_role`/Agents 화면 값도 그대로야(등록을 하지 않았으므로). Blocking Delegation, `request_arch_review`, `archReview`/`latestUserRequirements` 구조적 분리, `tool_deliveries`, 종료 순서, Arch 타임아웃 120초(범위 30~600), 단일 worker, DB 스키마·`user_version=6`, 실행 파일 이름 `esh-chat-mvp4` 모두 그대로고 새 Tauri 명령·새 DB 쓰기·프런트 변경은 없어.
+- 검증 (실제 출력):
+  - `cargo test --bin esh-chat-mvp4` (프로젝트 상위 `.tools`의 cargo를 `src-tauri/`에서 직접 실행) → `test result: ok. 84 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.84s` (기존 83 → 84, 순증 1). 신규 `workspace::tests::a_claude_session_needs_a_registration_the_adapter_claims` → `ok`. Rust 경고는 기존 2건(`agents.rs`의 `Authenticated`·`Required`·`Error`, `Ready` 미생성 variant)뿐이고 `workspace.rs`·`main.rs`·`claude.rs`에서 새 경고는 없어.
+  - `node scripts/verify_external_threads.mjs` → `{"passed":true,"recordedRows":27,"scratchRowsHidden":9,"normalConversationsPreserved":true}`
+  - `npm run build` → `✓ built in 5.09s` (`dist/assets/index-B_6vxOOa.js` 433.29 kB, `index-YBSTmYxd.css` 52.24 kB, `guiProbe-djswdxyz.js` 45.64 kB — 프런트를 건드리지 않아 해시 동일)
+  - 경고 재확인: `scripts/rust.ps1`은 이 환경에서 cargo의 stderr 진행 메시지에 끊겨 exit 1로 보이므로 `.tools\cargo\bin\cargo.exe`를 `CARGO_HOME`/`RUSTUP_HOME`/`PATH`를 `.tools`로 맞춰 직접 실행했어. **작업 디렉터리는 `mvp-app/`이 아니라 `mvp-app/src-tauri/`여야 해** — `mvp-app/`에서 돌리면 `could not find Cargo.toml`로 즉시 실패해(이번에 한 번 실패한 뒤 경로를 고쳤어).
+- 신규 테스트가 실제로 확인한 것: (1) `claude_code` Lead 등록을 만들어도 `connection == not_configured`이면 `create_claude_session`·`create_agent_session` **둘 다** `실행 연결이 설정되지 않은`으로 거절하고, `support`는 `unsupported`, `active_role`은 `None`으로 남는다는 것, (2) 어댑터가 부여할 `connection_kind`를 DB에 직접 넣은 뒤에는 세션이 `provider='claude_code'`로 만들어지고 **반환값과 실제 저장 행 모두** 등록 ID를 갖는다는 것, (3) 세션을 만든 것만으로 `support`/`active_role`이 올라가지 않는다는 것(등록 순서 규칙 유지), (4) 세션이 등록을 고정하므로 `unregister_agent_instance`가 계속 거절된다는 것, (5) `role == reviewer`인 Claude 등록, 실행 파일이 사라진 등록, `codex`/`antigravity`/없는 ID는 각각 거절된다는 것, (6) 재시작(`Store::open`) 후에도 `provider`가 `claude_code`로 남는다는 것.
+- 이 검증의 경계(중요):
+  - `create_session` **Tauri 명령 자체**는 `Engine`(`AppHandle`)을 들어 단위 테스트로 호출하지 못했어. 테스트는 그 명령이 호출하는 `create_agent_session`/`create_claude_session`/`create_lead_session`을 실제 SQLite로 검사한 것이고, 명령 배선은 컴파일과 코드 확인으로만 검증했어.
+  - **`claude_code` 세션은 여전히 실제로 만들 수 없어.** 등록이 `claude_code_cli`를 받는 경로가 없기 때문이야(어댑터 미등록). 이번 조각은 "등록이 그 값을 받는 순간 열릴 세션 경로"를 만든 것이고, "Claude Code 연결"이나 "Claude 턴 실행"이 아니야.
+  - 실제 `claude -p` 1회, `python scripts/verify_*.py`, WebView, 데스크톱 빌드는 실행하지 않았어(변경이 Rust 백엔드이고 실행 중인 앱을 건드리지 않으려고).
+- 남은 문제:
+  1. **승인 대기**: 실제 `claude -p` 1회로 stream-json 원문 캡처(외부 데이터 전송 + 계정 사용량). 이때까지 `parse_events`는 공개 문서 기준이야.
+  2. 등록 조각 미구현 — `ConnectionKind::ClaudeCodeCli`·`ClaudeCodeAdapter` descriptor·`registered()` 추가(`agents.rs`), `register_agent_instance`에서 `claude_code` Lead + 설치된 경로일 때 `connection_kind = claude_code_cli` 부여와 `active_role` 매핑(`registry.rs`). **이 조각이 들어가면 위 세션 경로가 실제로 열리므로** 그때 `claude_runner`의 검사를 `role` → `active_role == Some("lead")`로 좁히고 `support`를 실행 경로와 일치시켜야 해.
+  3. `create_lead_session`의 두 커밋 — `add_session`이 먼저 커밋되므로 그 사이에 읽는 소비자는 아직 `provider='codex'`인 세션을 볼 수 있어. provider·등록 ID와 revision은 한 문장으로 묶었지만 세션 행 생성까지 한 트랜잭션으로 합치지는 않았어(기존 OpenCode 경로도 같았음). 실제 관측된 문제는 없고, 필요하면 다음에 `add_session`을 같은 트랜잭션으로 흡수해야 해.
+  4. 도구 정책 미확정 — `--permission-mode plan`이 대화 전용 계약을 실제로 지키는지 미검증.
+  5. 1단계 잔여 4건(GUI 실행 확인, `tauri-plugin-single-instance` 내부 경합, 원본 세션 전역 잠금=승인 대기, 종료 중 거절의 WebView 재현)은 그대로 차단 상태야.
+- 다음 작업: (c) `agents.rs`+`registry.rs` 등록 조각 — `claude_code` Lead 등록에 `claude_code_cli` 연결을 부여하고 `ClaudeCodeAdapter`를 `registered()`에 넣은 뒤, 같은 조각에서 `claude_runner`를 `active_role` 기준으로 좁혀 `support` 표기가 실행 경로와 일치하게 맞출 것. 승인을 받으면 그 전에 실제 `claude -p` 캡처로 `parse_events`를 확정하는 편이 좋아.
+- 실행 메모(이 환경): `.tools\cargo\bin\cargo.exe`는 **`mvp-app/src-tauri/`에서** 실행할 것(`mvp-app/`에는 `Cargo.toml`이 없어 `could not find Cargo.toml`). `Out-File -Encoding utf8` 로그는 BOM 때문에 `grep`이 첫 줄을 못 잡을 수 있으니 `grep -a`로 확인할 것.
+
+## 실행 분기를 허용 목록으로 전환하고 Claude 턴 분기 추가 (2026-10-26, 3단계 네 번째 조각)
+
+- 선택한 작업: 3단계(추가 CLI 어댑터)의 다음 조각으로, 17회차가 남긴 (a) "`worker`의 target 분기를 `turn_route`로 바꾸고 `claude_turn` 추가". 17회차가 세운 가드는 `submit`에만 있었고 `worker`는 여전히 `input.target` 문자열을 비교해 마지막 분기가 Codex 턴이었어. 즉 세션 provider와 target이 어긋난 입력이 큐에 남아 있으면(예: 큐에 넣은 뒤 provider가 바뀐 경우) Codex가 답하고 그 세션 에이전트가 답한 것처럼 저장될 수 있었어. 이번에 분기 기준을 판정 함수 결과로 바꿔 그 경로를 없앴어.
+- 변경 파일: `mvp-app/src-tauri/src/engine.rs`, `mvp-app/src-tauri/src/claude.rs`(모듈 주석만).
+  - `TurnRoute::Claude` 추가 + `turn_route`에 `"claude_code" => (target == "claude_code").then_some(TurnRoute::Claude)` 한 줄. Codex 세션의 허용 목록(`codex`/`antigravity`)과 OpenCode 세션(`opencode`만)은 그대로야.
+  - `worker`가 `self.store.session(...)`으로 읽은 세션과 target으로 `route`를 한 번 계산하고, `route == Some(TurnRoute::Arch/OpenCode/Claude/Codex)`로 분기해. 문자열 비교 3곳(`antigravity`·`opencode`·`codex`)이 사라졌고, **어떤 route에도 해당하지 않는 입력은 Codex로 떨어지지 않고 오류로 끝나**. 오류 경로의 에이전트 키도 route를 따라가 — CLI lead의 상태 행은 provider 이름이 아니라 등록 ID로 잡히므로, Claude/OpenCode 실패는 `agent_key`(등록 ID), Arch는 `antigravity`, Codex는 `codex`에 기록돼. 이전에는 `input.target`을 그대로 써서 `claude_code` 이름의 상태 행을 찾다 실패했을 자리야.
+  - `commit_opencode_answer` → `commit_lead_answer(store, speaker, session_id, user_id, external, text)`로 일반화. 두 CLI lead가 **확정 → 외부 세션 바인딩 → 답변 저장** 순서를 한 곳에서 공유하고, 답변 작성자(`opencode`/`claude_code`)만 달라. 14회차에 정한 순서 규칙은 그대로야.
+  - `claude_runner(store, session)` 추가 — provider가 `claude_code`인지, 등록 ID가 있는지, 등록이 존재하는지, `role == "lead"`이고 실행 파일이 지금도 있는지 확인해 (등록 ID, 경로)를 돌려줘. `active_role`이 아니라 `role`을 보는 이유는 아래 남은 문제 2번에 적었어.
+  - `claude_turn(user, stop)` 추가 — `claude::run(경로, data_dir, 저장된 세션 ID, 모델, 사용자 메시지, stop)` → 중단 확인 → `commit_lead_answer("claude_code", ...)` → 상태 `completed`. OpenCode와 같은 형태야.
+  - `claude.rs`는 모듈 주석만 갱신했어("등록·배선 없음" → "Engine 분기는 있으나 도달 불가, 등록·세션 경로가 남음"). 계약·파서·`run` 시그니처는 그대로고 `CONNECTION_KIND`는 여전히 미사용이라 `#![allow(dead_code)]`를 유지했어.
+- 동작 보존: 도달 가능한 세 조합(`codex`→`codex`, `codex`→`antigravity`, `opencode`→`opencode`)은 같은 분기로 가고 거절·오류 문구도 같아. `claude_code` 세션은 만들 수 없고 `submit`도 `claude_code` target을 거부하므로(`registered()`에 그런 어댑터가 없음) 살아 있는 동작 변화는 없어. Blocking Delegation, `request_arch_review`, `archReview`/`latestUserRequirements` 구조적 분리, `tool_deliveries`, 종료 순서, Arch 타임아웃 120초(범위 30~600), 단일 worker, DB 스키마·`user_version=6`, 실행 파일 이름 `esh-chat-mvp4` 모두 그대로야. 새 Tauri 명령·새 DB 쓰기·프런트 변경은 없어.
+- 검증 (실제 출력):
+  - `cargo test --bin esh-chat-mvp4` (프로젝트 상위 `.tools`의 cargo를 직접 실행) → `test result: ok. 83 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.86s` (기존 79 → 83, 순증 4). 신규: `engine::cli_commit_tests::a_finished_claude_turn_uses_the_same_rows_under_its_own_speaker`, `engine::claude_runner_tests::only_a_claude_session_with_a_runnable_lead_registration_resolves`, `engine::claude_runner_tests::a_registration_without_a_lead_role_or_a_present_file_does_not_run`, `engine::session_route_tests::a_claude_session_owns_only_its_own_cli` — 모두 `ok`. 재작성: `a_finished_opencode_turn_binds_the_external_session_and_stores_the_answer`(일반화된 함수 시그니처), `a_cancelled_turn_neither_moves_the_external_session_nor_stores_an_answer`(두 작성자 반복), `a_provider_without_a_branch_never_falls_through_to_codex`(`claude_code`는 이제 자기 분기를 가지므로 목록에서 빼고 나머지 provider로 가드 유지). 기존 `engine::*` 나머지(compaction·envelope·switch)도 모두 `ok`.
+  - `node scripts/verify_external_threads.mjs` → `{"passed":true,"recordedRows":27,"scratchRowsHidden":9,"normalConversationsPreserved":true}`
+  - `npm run build` → `✓ built in 3.30s` (`dist/assets/index-B_6vxOOa.js` 433.29 kB, `index-YBSTmYxd.css` 52.24 kB, `guiProbe-djswdxyz.js` 45.64 kB — 프런트를 건드리지 않아 해시 동일)
+  - Rust 경고는 기존 2건(`agents.rs`의 `Authenticated`·`Required`·`Error`, `Ready` 미생성 variant)뿐이고 `engine.rs`·`claude.rs`에서 새 경고는 없어. `claude::run`이 이제 호출부를 가져 `claude.rs`의 미사용 항목은 `CONNECTION_KIND` 하나로 줄었어.
+- 신규 테스트가 실제로 확인한 것: (1) 같은 `commit_lead_answer`가 `opencode`와 `claude_code` 각각에서 같은 행·같은 순서로 답변을 저장하되 **작성자를 섞지 않는다**는 것, (2) 취소된 턴은 두 작성자 모두에서 외부 세션을 옮기지 않고 답변도 남기지 않는다는 것, (3) `claude_runner`가 Codex 세션·등록 ID 없음·없는 등록·reviewer 역할·디스크에서 사라진 실행 파일을 각각 거절하고 정상 등록에서만 (등록 ID, 정규화 경로)를 돌려준다는 것, (4) `claude_code` 세션은 `claude_code` target만 통과하고 `codex`·`antigravity`·`opencode`·`gemini_cli`·빈 문자열은 거절되며, `gemini_cli`·`mock_agent`·`unknown`은 여전히 **모든** target이 거절된다는 것(가드 유지 확인).
+- 이 검증의 경계(중요):
+  - `claude_turn`은 **이번에도 실제로 실행되지 않았어.** 두 겹으로 막혀 있어: ① `claude_code` provider 세션을 만드는 명령이 없고 ② `submit`이 `target="claude_code"`를 `registered()` 목록에 없어서 거부해. 따라서 이번 변경은 "Claude Code 연결"이 아니라 **분기 자리와 순서 규칙**을 만든 것이야. 실제 `claude -p`는 여전히 승인 대기야.
+  - `Engine`이 `AppHandle`을 들고 있어 `claude_turn`·`worker` 자체는 단위 테스트로 호출하지 못했어. 테스트는 `claude_turn`이 읽는 입력(세션 행·등록 행)과 판정 함수(`turn_route`)·마감 함수(`commit_lead_answer`)·해석 함수(`claude_runner`)를 검사한 것이고, 배선은 컴파일과 코드 확인으로만 검증했어.
+  - `python scripts/verify_*.py`, WebView, 데스크톱 빌드는 실행하지 않았어(변경이 Rust 백엔드이고 실행 중인 앱을 건드리지 않으려고).
+- 남은 문제:
+  1. **승인 대기**: 실제 `claude -p` 1회로 stream-json 원문 캡처(외부 데이터 전송 + 계정 사용량). 이때까지 `parse_events`는 공개 문서 기준이야.
+  2. 등록·세션 경로 미구현 — `ConnectionKind::ClaudeCodeCli`·`ClaudeCodeAdapter`·`registered()` 추가(`agents.rs`), `active_role`의 연결 매핑과 등록 시 `connection_kind` 부여(`registry.rs`), `create_claude_session`(`workspace.rs`), `create_session` 명령의 provider 분기(`main.rs`)가 남아 있어. **`claude_runner`가 `role`을 보는 이유가 여기야** — 어댑터가 등록되기 전에는 `active_role`이 `None`이라 그 값으로는 턴을 찾을 수 없어. 등록 조각이 들어오면 `active_role == Some("lead")` 검사로 좁혀야 해.
+  3. `support` 표기 — 등록만 먼저 하면 `active_role`이 `Some("lead")`가 되어 Agents 화면이 `supported`로 올라가는데, 세션 경로가 없으면 실행할 수 없어 거짓 표기가 돼. 그래서 **세션 경로를 먼저** 넣고(등록이 없어 `support`는 `unsupported` 그대로) **등록을 나중에** 넣어야 해.
+  4. 도구 정책 미확정 — `--permission-mode plan`이 대화 전용 계약을 실제로 지키는지 미검증.
+  5. 1단계 잔여 4건(GUI 실행 확인, `tauri-plugin-single-instance` 내부 경합, 원본 세션 전역 잠금=승인 대기, 종료 중 거절의 WebView 재현)은 그대로 차단 상태야.
+- 다음 작업: (b) Claude 세션 경로 — `workspace.rs`의 `create_claude_session`(provider `claude_code`, 등록 검사는 `role`/`installation` 기준)과 `main.rs` `create_session` 명령의 provider 분기. 이 조각은 등록이 없어 `support`를 바꾸지 않으므로 안전해. 그다음 (c) `agents.rs`+`registry.rs` 등록 조각에서 `claude_runner`의 검사를 `active_role`로 좁히고 `support`를 실행 경로와 일치시킬 것. 승인을 받으면 그 전에 실제 `claude -p` 캡처로 `parse_events`를 확정하는 편이 좋아.
+- 실행 메모(이 환경): `scripts/rust.ps1` 대신 `.tools\cargo\bin\cargo.exe`에 `CARGO_HOME`/`RUSTUP_HOME`/`PATH`를 `.tools`로 맞춰 직접 실행할 것(스크립트는 cargo의 stderr 진행 메시지에서 끊겨 컴파일 오류가 없어도 exit 1). 테스트 모듈에서 `fn store()` 헬퍼를 같은 함수 안에서 두 번 부르면 지역 변수에 가려 `E0618`이 나므로 헬퍼 이름을 달리할 것.
+
+## 세션 provider와 실행 분기의 일치를 허용 목록으로 판정 (2026-10-25, 3단계 세 번째 조각)
+
+- 선택한 작업: 3단계(추가 CLI 어댑터) 다음 조각의 **전제 조건**. 지난 회차가 "Engine `claude_turn` 배선 전까지는 `submit`이 그 세션을 Codex 턴으로 보내지 않도록 provider 검사부터 닫아 둘 것"이라고 남긴 항목이야. `submit`의 기존 검사는 두 조합만 막는 블랙리스트(`opencode` 세션→비opencode, `codex` 세션→opencode)여서 `provider='claude_code'`인 세션에 `target='codex'`가 그대로 통과했고, `worker`의 마지막 분기가 `codex_turn`이라 **Codex가 답한 뒤 세션 에이전트가 답한 것처럼 저장**되는 경로가 열려 있었어. Claude 인스턴스를 등록하면 그 경로가 실제로 열리므로 등록보다 먼저 닫았어.
+- 변경 파일: `mvp-app/src-tauri/src/engine.rs` 1개.
+  - `TurnRoute { Codex, OpenCode, Arch }` + `turn_route(session, target)` 추가 — 세션 provider 기준 **허용 목록**이야. `codex`는 `codex`(Codex 턴)와 `antigravity`(Arch 질의, 위임 검토이지 두 번째 Lead가 아님)만, `opencode`는 `opencode`만 통과하고 **그 밖의 provider는 모든 대상이 거절**돼. `worker`의 마지막 분기가 Codex 턴이라는 사실에 기대지 않고, 분기가 없는 provider를 호출 전에 막아.
+  - `compact_thread(session)` 추가 — 수동 압축은 Codex 스레드 작업이야. `provider != "codex"`면 `Codex 세션이 아니어서 컨텍스트를 압축할 수 없습니다`로 거절하고, 그다음에 기존과 같은 `thread_id` 검사를 해. OpenCode 세션은 `thread_id`에 **자기 CLI 세션 ID**가 들어 있어(12회차 `commit_opencode_answer` → `bind_codex_session`) 기존 코드처럼 `thread_id`만 보면 그 값을 Codex 압축에 넘기게 돼.
+  - `submit`은 `turn_route(&saved, &target).is_none()`이면 기존과 같은 메시지(`이 세션의 에이전트와 메시지 대상이 다릅니다`)로 거절하고, `request_compact`는 `session.thread_id.as_deref().ok_or(...)`를 `compact_thread(session)?`로 교체했어(스레드 없음 메시지 동일).
+- 동작 보존: 정상 조합 세 가지(`codex`→`codex`, `codex`→`antigravity`, `opencode`→`opencode`)는 이전과 똑같이 통과하고, 거절 문구도 그대로야. 달라진 것은 (1) `codex`/`opencode`가 아닌 provider 세션의 **모든** 대상이 거절되고, (2) 비Codex 세션의 압축 요청이 거절된다는 두 가지뿐이야. 그런 세션은 아직 만들 수 없어(`create_session`은 codex, `create_opencode_session`은 opencode) 살아 있는 동작 변화는 없어. Blocking Delegation, `request_arch_review`, `archReview`/`latestUserRequirements` 구조적 분리, `tool_deliveries`, 종료 순서, Arch 타임아웃 120초(범위 30~600), 단일 worker, DB 스키마·`user_version=6`, 실행 파일 이름 `esh-chat-mvp4` 모두 그대로야. 새 Tauri 명령·새 DB 쓰기·프런트 변경은 없어.
+- 검증 (실제 출력):
+  - `cargo test --bin esh-chat-mvp4` (프로젝트 상위 `.tools`의 cargo를 직접 실행) → `test result: ok. 79 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.86s` (기존 75 + 신규 4). 신규: `engine::session_route_tests::a_codex_session_owns_the_codex_turn_and_the_arch_question_channel`, `an_opencode_session_only_answers_its_own_cli`, `a_provider_without_a_branch_never_falls_through_to_codex`, `manual_compaction_is_a_codex_thread_operation_only` — 모두 `ok`.
+  - `node scripts/verify_external_threads.mjs` → `{"passed":true,"recordedRows":27,"scratchRowsHidden":9,"normalConversationsPreserved":true}`
+  - `npm run build` → `✓ built in 3.60s` (`dist/assets/index-B_6vxOOa.js` 433.29 kB, `index-YBSTmYxd.css` 52.24 kB, `guiProbe-djswdxyz.js` 45.64 kB — 프런트를 건드리지 않아 해시 동일)
+  - Rust 경고는 기존 2건(`agents.rs`의 `Authenticated`·`Required`·`Error`, `Ready` 미사용 variant)뿐이고 `engine.rs`에서 새 경고는 없어.
+- 신규 테스트가 실제로 확인한 것: (1) 실제 `chat_sessions` 행(codex)에서 `codex`→Codex 턴, `antigravity`→Arch, `opencode`·`claude_code`·`gemini_cli`·빈 문자열→거절, (2) 실제로 등록한 OpenCode 인스턴스로 만든 세션은 `opencode`만 통과하고 `codex`·`antigravity`·`claude_code`는 거절, (3) 세션 provider를 `claude_code`·`gemini_cli`·`mock_agent`·`unknown`으로 바꾼 각 경우에 **어떤 대상도 Codex 턴으로 떨어지지 않음**(등록 전에 필요한 가드), (4) 압축은 Codex 세션이면서 `bind_codex_session`으로 스레드가 있을 때만 스레드 ID를 돌려주고, OpenCode 세션에 `thread_id`를 넣어도 `Codex 세션이 아니어서`로 거절.
+- 이 검증의 경계(중요): `Engine`은 `AppHandle`을 들고 있어 `submit`·`request_compact` **자체**를 단위 테스트로 호출하지 못했어. 테스트는 두 함수가 읽는 `Session` 행과 판정 함수(`turn_route`·`compact_thread`)를 검사한 것이고, 배선(어느 지점에서 부르는지)은 컴파일과 코드 확인으로만 검증했어. 실제 WebView에서의 거절 표시, `python scripts/verify_*.py`, 데스크톱 빌드는 실행하지 않았어(변경이 Rust 백엔드이고 실행 중인 앱을 건드리지 않으려고). 이 결과를 "Claude Code 연결 성공"이나 "어댑터 동작"으로 집계하지 않아 — Claude 쪽 실행 경로는 여전히 `claude.rs` 안에만 있고 등록·배선되지 않았어.
+- 남은 문제:
+  1. **승인 대기**: 실제 `claude -p` 1회로 stream-json 원문 캡처(외부 데이터 전송 + 계정 사용량). 이때까지 `claude.rs`의 이벤트 형식은 공개 문서 기준이야.
+  2. 어댑터 미등록·미배선 — `ConnectionKind::ClaudeCodeCli`·`ClaudeCodeAdapter`, `probe_install`의 claude 경로, `register_agent_instance`의 `claude_code`→`claude_code_cli` 연결, `worker`의 Claude 분기, `create_session`의 provider 선택, `claude_turn`이 모두 남아 있어. 등록을 먼저 하면 `support`가 `supported`로 올라가는데 실행 경로가 없어 거짓 표기가 되므로 **배선 뒤에 등록**해야 해.
+  3. 도구 정책 미확정 — `--permission-mode plan`이 대화 전용 계약을 실제로 지키는지 미검증.
+  4. 1단계 잔여 4건(GUI 실행 확인, `tauri-plugin-single-instance` 내부 경합, 원본 세션 전역 잠금=승인 대기, 종료 중 거절의 WebView 재현)은 그대로 차단 상태야.
+- 다음 작업: 이제 분기 없는 provider가 Codex로 새지 않으므로 `claude_turn` 배선을 다음 조각으로 진행할 수 있어. 순서는 (a) `worker`의 target 분기를 `turn_route`로 바꿔 Claude 분기 자리를 만들고 `claude_turn`(세션의 등록 인스턴스 → `claude::run` → 답변 저장)을 추가, (b) `create_session`에서 Claude 인스턴스를 provider로 선택, (c) 그 뒤 `ClaudeCodeAdapter` 등록과 `claude_code_cli` 매핑. 승인을 받으면 (a) 전에 실제 `claude -p` 캡처로 `parse_events`를 확정하는 편이 좋아.
+- 실행 메모(이 환경): `scripts/rust.ps1`은 `$ErrorActionPreference='Stop'`이라 cargo의 stderr 진행 메시지에서 끊겨 컴파일 오류가 없어도 exit 1로 보여. `.tools\cargo\bin\cargo.exe`를 `CARGO_HOME`/`RUSTUP_HOME`/`PATH`를 `.tools`로 맞춰 직접 실행할 것.
+
+## Claude Code 턴 실행 경로 — 한 턴 = 한 프로세스, 취소·시간 초과 시 트리 종료 (2026-10-25, 3단계 두 번째 조각)
+
+- 선택한 작업: 3단계(추가 CLI 어댑터)의 다음 조각. 지난 회차는 프로토콜 골격만 세우고 "실행 경로가 없는데 `supported`로 승격하지 않으려고" 어댑터를 등록하지 않았어. 등록(`ClaudeCodeAdapter` + `claude_code_cli` 매핑 + `claude_turn` 배선)은 `agents.rs`·`registry.rs`·`engine.rs`·`store.rs`를 함께 건드려 이번 회차의 1~3파일 범위를 넘고, 등록보다 **먼저 실행 경로가 있어야** `support` 표기가 정직해져. 그래서 이번에는 실행 경로 한 조각만 만들었어.
+- 변경 파일: `mvp-app/src-tauri/src/claude.rs` 1개.
+  - `turn_args(existing, model, prompt)` 추가 — `command_args` 뒤에 프롬프트를 **마지막 위치 인자**로 붙여. 설치본 `--help` 1행이 `Usage: claude [options] [command] [prompt]`, 7행이 `prompt  Your prompt`로 위치 인자를 선언하고 있어 그 형태를 그대로 써. 프롬프트가 플래그 값 자리에 끼어들지 않아.
+  - `run(path, work_dir, existing, model, prompt, stop)` 추가 — `opencode::run`과 같은 형태야. 실행 파일이 파일이 아니면 시작 전에 거절하고, 빈 요청도 프로세스를 띄우기 전에 거절해. `current_dir(work_dir)`, stdin null, stdout/stderr 파이프, `kill_on_drop`, 창 숨김.
+  - `collect(command, expected, stop, limit)` 분리 — 캡처·대기·판정만 담당하는 내부 함수야. `stop.changed()`나 180초 시간 초과에서 `cli::stop_tree`로 **프로세스 트리 전체**를 끝낸 뒤 오류를 돌려줘 고아 프로세스가 남지 않아. stdout 4,194,305 / stderr 65,537 바이트 상한을 넘으면 실패. 종료 코드가 0이 아니면 코드만 알리고 **stderr 본문은 호출자에게 전달하지 않아**(내부 맥락 유출 방지). 성공하면 `parse_events`로 분류.
+- 동작 보존: `command_args`·`parse_events`·`Answer`·`CONNECTION_KIND`는 값·시그니처를 바꾸지 않았어. `main.rs`의 `mod claude;` 한 줄도 그대로고 새 모듈·새 Tauri 명령·새 DB 쓰기·스키마 변경은 없어. Blocking Delegation, `request_arch_review`, `archReview`/`latestUserRequirements` 분리, `tool_deliveries`, 종료 순서, Arch 타임아웃 120초(범위 30~600), 단일 worker, `user_version=6`, 실행 파일 이름 `esh-chat-mvp4` 모두 그대로야.
+- **`support` 표기는 이번에도 바뀌지 않았어.** `run`이 아직 어디에서도 호출되지 않으므로(모듈 단위 `#![allow(dead_code)]` 유지) `registered()`·`active_role`·`probe_agents()`·Agents 화면·`snapshot.agents` 값은 이전과 같고, 등록된 Claude 인스턴스는 여전히 `unsupported`/`unavailable`이야. 실행 경로가 생겼다는 이유만으로 `supported`로 올리지 않았어 — Engine 배선이 없으면 실제 턴이 만들어지지 않기 때문이야.
+- 검증 (실제 출력):
+  - `cargo test --bin esh-chat-mvp4` (프로젝트 상위 `.tools`의 cargo를 직접 실행) → `test result: ok. 75 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.25s` (기존 70 + 신규 5). 신규: `claude::tests::the_prompt_is_the_trailing_positional_argument`, `a_stub_stream_is_captured_and_classified_through_the_real_process_path`, `a_failed_exit_reports_the_code_without_leaking_stderr`, `a_cancelled_or_slow_turn_stops_the_child_instead_of_waiting`, `a_missing_cli_or_an_empty_request_fails_before_any_process_starts` — 모두 `ok`. 기존 `claude::tests::*` 7개도 모두 `ok`.
+  - `node scripts/verify_external_threads.mjs` → `{"passed":true,"recordedRows":27,"scratchRowsHidden":9,"normalConversationsPreserved":true}`
+  - `npm run build` → `✓ built in 2.66s` (`dist/assets/index-B_6vxOOa.js` 433.29 kB, `index-YBSTmYxd.css` 52.24 kB, `guiProbe-djswdxyz.js` 45.64 kB — 프런트를 건드리지 않아 해시 동일)
+  - Rust 경고는 기존 2건(`agents.rs`의 `Authenticated`·`Required`·`Error`, `Ready` 미사용 variant)뿐이고 `claude.rs`에서 새 경고는 없어.
+- 신규 테스트가 실제로 확인한 것: (1) `turn_args`의 마지막 원소가 프롬프트이고 앞부분이 `command_args`와 같으며 프롬프트가 플래그 자리에 없다는 것, (2) 스텁 자식 프로세스(powershell)가 실제로 띄운 NDJSON을 캡처해 `stub answer`로 분류하고 기대 세션과 다르면 `세션 ID가 일치하지 않습니다`로 실패한다는 것, (3) 종료 코드 3이면 `종료 코드`를 포함한 오류가 나오고 스텁이 stderr에 쓴 `secret-context-value`는 메시지에 없다는 것, (4) 취소 신호와 200ms 제한에서 각각 `중단`·`시간 초과`로 끝나고 자식이 종료된다는 것, (5) 없는 실행 파일과 공백 프롬프트는 프로세스를 띄우기 전에 거절된다는 것(플레이스홀더 exe는 실행되지 않음).
+- 이 검증의 경계(중요):
+  - 프로세스 배관(스폰·캡처·종료 코드·취소·시간 초과)은 **스텁 자식 프로세스**로 검증한 것이고, 설치된 `claude.exe`를 실제로 실행한 결과가 아니야. 실제 `claude -p` 1회는 프롬프트가 외부 API로 나가고 계정 사용량을 쓰므로 **여전히 승인 대기**야. 따라서 이 경로를 "Claude Code 연결 성공"으로 집계하지 않아.
+  - 스트림 이벤트 형식은 지난 회차와 같이 공개 headless/SDK 문서 기준이며 실제 출력으로 확정되지 않았어.
+  - `python scripts/verify_*.py`와 데스크톱 빌드는 실행하지 않았어(변경이 Rust 모듈 내부이고 실행 중인 앱을 건드리지 않으려고). WebView·GUI 확인도 하지 않았어.
+- 남은 문제:
+  1. **승인 대기**: 실제 `claude -p` 1회로 stream-json 원문을 캡처해 `parse_events`와 `run`의 종료·출력 형태를 실제 형식으로 확정하는 일(외부 데이터 전송 + 계정 사용량).
+  2. 어댑터 미등록·미배선 — `ConnectionKind::ClaudeCodeCli`·`ClaudeCodeAdapter`(descriptor), `register_agent_instance`의 `claude_code`→`claude_code_cli` 연결, `active_role` 매핑, 세션 provider(`create_session`)와 Engine `claude_turn` 분기가 모두 남아 있어. 4개 파일에 걸쳐 있어 다음 조각에서 등록·매핑과 배선을 나눠 진행해야 해.
+  3. 도구 정책 미확정 — `--permission-mode plan`은 설치본이 선언한 모드 중 보수적 선택일 뿐, 대화 전용 계약을 실제로 지키는지 검증되지 않았어. `--permission-prompts none`·`--disallowedTools` 조합도 실제 실행 확인 뒤에 정해야 해.
+  4. 1단계 잔여 4건(GUI 실행 확인, `tauri-plugin-single-instance` 내부 경합, 원본 세션 전역 잠금, 종료 중 거절의 WebView 재현)은 그대로 차단 상태야.
+- 다음 작업: (a) 승인 시 `claude -p` 1회 캡처로 파서·실행 형태 확정, (b) 승인 없이는 `ConnectionKind::ClaudeCodeCli` + `ClaudeCodeAdapter` descriptor + `registry.rs`의 `claude_code_cli` 연결/`active_role` 매핑을 한 조각으로 하되, Engine `claude_turn` 배선 전까지는 `submit`이 그 세션을 Codex 턴으로 보내지 않도록 provider 검사부터 닫아 둘 것.
+- 실행 메모(이 환경): `scripts/rust.ps1`은 `$ErrorActionPreference='Stop'`이라 cargo가 stderr로 쓰는 진행 메시지에서 `NativeCommandError`로 끊겨 **실제 컴파일 오류가 없어도 exit 1**로 보여. `.tools\cargo\bin\cargo.exe`를 직접 실행하면 정상 출력·종료 코드를 얻을 수 있어.
+
+## Claude Code 호출 계약·stream-json 분류 골격 (2026-10-25, 3단계 첫 조각)
+
+- 선택한 작업: 3단계(추가 CLI 어댑터) 첫 조각 — Claude Code Lead 어댑터의 **비파괴 probe + 프로토콜 골격**. 직전 결정대로 1단계 항목은 더 캐지 않았어. 이번 조각은 **어댑터 등록·세션 경로·Engine 배선 없이** 프로토콜 정의만 세우는 단계야.
+- 먼저 확인한 사실: `C:\Users\서승우\.local\bin\claude.exe`(293,227,168 bytes, 2026-10-20 18:12)가 있고 `~/.claude`도 있어. `claude --version` → `2.1.304 (Claude Code)`. `claude --help`로 플래그를 확인했고 **추측하지 않았어**.
+- 변경 파일:
+  - `mvp-app/src-tauri/src/claude.rs`(신규) — `CONNECTION_KIND = "claude_code_cli"`, `command_args(existing, model)`, `parse_events(output, expected)`, `Answer{session_id,text}`, 회귀 테스트 7개. 모듈 상단에 `#![allow(dead_code)]`를 두고 "아직 등록·실행되지 않는 준비 단계"임을 주석으로 명시해 경고 없이 컴파일돼.
+  - `mvp-app/src-tauri/fixtures/claude-cli-2.1.304-help.txt`(신규) — 이 PC의 설치본이 실제로 출력한 `--help` 전문(313줄, 22,319 bytes)을 그대로 보존. `mvp-app/evidence/`는 `.gitignore` 대상이라 **새 클론에서 컴파일이 깨지므로** 추적되는 `src-tauri/fixtures/`에 두고 `include_str!`로 컴파일 시점에 읽어.
+  - `mvp-app/src-tauri/src/main.rs` — `mod claude;` 한 줄 추가.
+- 계약 내용:
+  - `command_args`는 `-p --output-format stream-json --verbose --permission-mode plan`을 기본으로 하고, 세션이 있으면 `--resume <id>`, 모델을 고르면 `--model <m>`을 덧붙여. 이 6개 플래그와 `stream-json`·`plan` 값은 모두 설치본 `--help`에 실제로 선언된 것만 사용해.
+  - `parse_events`는 NDJSON 한 줄씩 읽어 `session_id`가 줄마다 같아야 하고(기대 세션과 다르면 오류), `assistant` 블록의 `tool_use`가 나오면 **답변하지 않고 실패**하며, 마지막 `result`가 정확히 한 번 있어야 해. 답변 텍스트는 `result.result`를 우선하고 비어 있으면 `assistant`의 `text` 블록을 이어 붙여. `is_error=true`면 오류. 알 수 없는 이벤트 종류와 CRLF는 무시해 최신 CLI가 새 이벤트를 보내도 턴이 깨지지 않아.
+- 검증 (실제 출력):
+  - `npm test` → `test result: ok. 70 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.72s` (기존 63 + 신규 7). 신규: `claude::tests::the_invocation_contract_only_uses_flags_the_installed_cli_declares`, `a_first_turn_resumes_nothing_and_uses_the_default_model`, `the_result_line_is_the_answer_and_the_session_must_not_change`, `an_assistant_text_block_is_only_the_fallback_for_the_answer`, `an_error_result_or_a_tool_call_fails_instead_of_answering`, `a_truncated_or_duplicated_stream_is_rejected`, `unknown_event_types_and_crlf_do_not_break_a_valid_turn` — 모두 `ok`.
+  - `node scripts/verify_external_threads.mjs` → `{"passed":true,"recordedRows":27,"scratchRowsHidden":9,"normalConversationsPreserved":true}`
+  - `npm run build` → `✓ built in 3.37s` (`dist/assets/index-B_6vxOOa.js` 433.29 kB, `index-YBSTmYxd.css` 52.24 kB, `guiProbe-djswdxyz.js` 45.64 kB — 프런트를 건드리지 않아 해시 동일)
+  - Rust 경고는 기존 3건(`agents.rs`의 `Authenticated`·`Required`·`Error`, `Ready` 미사용 variant)과 cargo 증분 lock 삭제 경고 1건뿐이고 `claude.rs`에서 새 경고는 없어.
+- 이 검증의 경계(중요):
+  - `--help` 대조 테스트는 **실제 설치본이 선언한 인터페이스**에 대한 근거야(자기 검사 아님). 반면 **이벤트 형식은 공개 headless/SDK 문서 기준으로 작성했고 이 PC의 실제 `claude -p` 출력으로 확인하지 않았어.** 따라서 이 모듈을 "동작하는 연결"이나 "실제 CLI 연결 성공"으로 집계하지 않아. 어댑터가 등록되지 않았으므로 `probe_agents()`·`Agents` 화면·`active_role`·`support` 값은 전부 이전과 같고, 등록된 Claude 인스턴스는 여전히 `unsupported`/`unavailable`이야(실행 경로가 없는데 `supported`로 승격하지 않으려고 이번에 등록하지 않았어).
+  - 실제 `claude -p` 1회 캡처는 프롬프트가 외부 API로 나가고 사용자 계정 사용량을 쓰므로 **승인 대기**로 남겨. 이 환경 샌드박스는 `claude --help` 실행 중에도 `reg.exe`를 차단했다고 보고했어(출력·종료코드는 정상). 실제 턴 검증이 이 샌드박스에서 온전히 재현될지도 함께 확인해야 해.
+- 남은 문제:
+  1. **승인 대기**: 실제 `claude -p` 1회로 stream-json 원문을 `evidence/`에 캡처해 파서를 실제 형식으로 확정하는 일(외부 데이터 전송 + 계정 사용량).
+  2. 어댑터 미등록 — `ClaudeCodeAdapter`/`LeadAdapter`/`LeadSession` 구현, `register_agent_instance`의 `claude_code`→`claude_code_cli` 매핑, 세션 생성 경로(`create_session` provider), Engine `claude_turn` 배선이 모두 남아 있어. 이걸 하려면 `support`가 실제 실행 경로와 일치하도록 등록·세션·배선을 한 묶음으로 해야 해.
+  3. 도구 정책 미확정 — `--permission-mode plan`은 설치본이 선언한 모드 중 보수적 선택일 뿐, 대화 전용 계약을 실제로 지키는지 검증되지 않았어. `--permission-prompts none`·`--disallowedTools` 조합은 실제 실행으로 확인한 뒤 정해야 해.
+  4. 1단계 잔여 4건(GUI 실행 확인, `tauri-plugin-single-instance` 내부 경합, 원본 세션 전역 잠금, 종료 중 거절의 WebView 재현)은 그대로 차단 상태야.
+- 다음 작업: (a) 승인을 받으면 `claude -p` 1회 캡처로 `parse_events`를 실제 형식에 맞추고, (b) 그 결과를 근거로 `ClaudeCodeAdapter` 등록 + `claude_code_cli` 매핑 + `claude_turn` 배선을 한 조각으로 진행. 승인 없이는 (b)만 먼저 하되 `support` 표기를 실행 경로와 함께 맞출 것.
+
+## 단계 게이트 결정 — 1단계 반복 중단, 3단계로 이동 (2026-10-25)
+
+- 배경: 1~14회차 자동 실행이 계속 1단계(기존 기능 안정화) 안에서 작은 정합성 결함을 찾아 고치는 데 머물렀어. 사용자가 이 반복을 지적했고, 앞으로 1단계 항목을 더 캐지 않고 3단계(추가 CLI 어댑터)로 넘어가.
+- **1단계를 "완료"로 기록하지 않아.** 아래 4건은 닫히지 않은 채로 남아 있어.
+- 1단계 현재 상태: 단위·Mock으로 닫을 수 있는 계약은 회귀 검사로 덮였어 — 종료 접수 차단(`ensure_accepting`, 등록·해제·모델 목록 포함), 무음 성공 제거(`tool_state`·`status`·`confirm_tool`·`bind_codex_session`·`bind_messages`→`deliver_requirements`), 리뷰 봉투의 단일 버전 읽기, 공개 답변 스트림·늦은 턴 이벤트 차단, OpenCode 턴 마감 순서, 등록 해제·고아 행 정리. 근거는 아래 각 항목의 `npm test` 결과야.
+- 남은 4건과 닫히지 않은 이유:
+  1. GUI 실행 확인 — 자동화 환경에서 WebView2가 초기화되지 않아(8회차: 창은 뜨지만 `#root` 자식 0, `gui-probe.json` 없음) 증거를 만들 수 없어. 사용자 화면 확인이 필요해.
+  2. `tauri-plugin-single-instance` 내부 경합 — 플러그인 내부 타이밍 문제라 이 저장소에서 재현 수단이 없어.
+  3. 원본 Codex 세션 전역 실행 잠금 — 실행 구조 변경이라 **승인 대기**야. 착수하지 않았어.
+  4. 종료 중 거절의 실제 WebView 재현 — 1번과 같은 이유로 막혀.
+- 2단계(Mock Agent 검증) 상태: Mock은 공개 답변, 늦은·중복 응답, 잘못된 요청 ID, 열린 도구 호출 1회 응답, 취소, 연결 재개를 스크립트로 재현하고 `npm test`에 포함돼 있어. 남은 "단일 worker 직렬성"은 `engine.rs`의 `worker()`가 **한 루프에서 한 job을 끝까지 `await`한 뒤 다음 `recv`를 하는 구조**라(engine.rs:428~454) 직렬성이 코드 형태로 고정돼 있고, `Engine`이 `AppHandle`을 들고 있어 테스트용으로 재작성하면 루프 모양을 검사하는 자기 검사가 돼. 별도 테스트를 만들지 않고 이 구조 확인으로 남겨. Mock 통과를 실제 CLI 연결 성공으로 집계하지 않는 원칙은 그대로야.
+- 다음 작업: 3단계(추가 CLI 어댑터). 첫 조각은 Claude Code(`claude` CLI 설치 확인됨, `~/.claude` 존재) Lead 어댑터의 **비파괴 probe + 프로토콜 골격**이야. 실제 연결 성공은 실제 `claude -p` 응답과 로그로만 기록하고, Mock·단위 결과로 대체하지 않아. 인증·설정 파일은 읽거나 바꾸지 않아.
+- 이 결정은 문서 기록이며 코드·DB·스키마·실행 파일 이름은 바꾸지 않았어.
+
+## 리뷰 요구사항 전달의 결합·전달 단일 쓰기 (2026-10-25)
+
+- 선택한 작업: 1단계(기존 기능 안정화) 잔여 항목 중 지난 회차가 남긴 "`bind_messages` 무음 성공". `engine.rs`의 리뷰 봉투 경로는 봉투를 Codex에 보낸 뒤 `bind_messages(ids, thread, turn)`로 대기 요구사항을 리뷰 턴에 묶고, **그다음** `delivery(ids, "delivered")`로 전달 완료를 표시했어. 두 문장이 서로 다른 트랜잭션이라 사이에서 실패하면(프로세스 종료·디스크 오류) 메시지는 특정 턴에 묶인 채 `delivery='queued'`로 남고, `pending_requirements`는 `queued`만 고르므로 **다음 리뷰에서 같은 요구사항을 Codex에 다시 전달**하게 돼. 게다가 `bind_messages`는 갱신 행 수를 보지 않아 없는 메시지 ID도 조용히 성공으로 처리하고 `meta.revision`만 올렸어. `tool_state`·`status`·`confirm_tool`·`bind_codex_session`에서 이미 제거한 무음 성공 유형의 남은 하나야.
+- 변경 파일:
+  - `mvp-app/src-tauri/src/store.rs` — `bind_messages`를 `deliver_requirements(ids, thread, turn)`로 대체. 빈 `thread`·`turn`을 거절하고, 전달할 요구사항이 없으면 아무것도 쓰지 않고 `Ok(())`(revision 불변). 한 트랜잭션 안에서 각 ID에 `thread_id`·`turn_id`·`delivery='delivered'`를 함께 쓰고, 갱신 행이 정확히 1이 아니면 `요구사항 메시지를 찾을 수 없습니다` 오류로 **배치 전체를 롤백**해. `meta.revision` 증가와 커밋도 같은 트랜잭션. 회귀 테스트 1개 추가.
+  - `mvp-app/src-tauri/src/engine.rs` — 봉투 전달 후 두 호출을 `deliver_requirements` 한 번으로 교체. `rpc.turn_id` 없음 검사(`Codex 턴이 없습니다`)와 `reply_to_tool_call` → 저장 → `emit` 순서는 그대로.
+  - `mvp-app/src-tauri/src/characterization_tests.rs` — 기존 3곳의 `bind_messages` + `delivery("delivered")` 조합을 `deliver_requirements` 한 번으로 교체(같은 최종 상태).
+- 동작 보존: 봉투의 키 이름·구조(`kind`, `archReview`, `latestUserRequirements{conversationVersion,messages}`, `reviewIsStale`, `processingOrder`)와 `processingOrder` 순서, `@arch` 제외 규칙, 봉투 전송 후 저장·`emit` 순서는 그대로야. Blocking Delegation(같은 RPC 호출에 결과 반환), `request_arch_review`, `archReview`/`latestUserRequirements` 구조적 분리, `tool_deliveries` 상태 전이, 종료 순서와 접수 차단, Arch 타임아웃 120초(범위 30~600), 단일 worker, DB 스키마·`user_version=6`, 사용자 메시지·세션·컨텍스트는 변경하지 않았어. 정상 경로에서 쓰는 행·값(`thread_id`/`turn_id`/`delivered`)은 이전과 같아. 달라진 것은 (1) 두 쓰기가 한 트랜잭션, (2) 없는 ID가 오류, (3) 대기 요구사항이 0건일 때 revision을 올리지 않음(이전에는 두 번 올리고 빈 `emit`을 했음) 세 가지야.
+- 검증 (실제 출력):
+  - `npm test` → `test result: ok. 63 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.49s` (기존 62 + 신규 1, `store::tests::delivering_requirements_binds_and_marks_delivered_in_one_write ... ok`)
+  - `node scripts/verify_external_threads.mjs` → `{"passed":true,"recordedRows":27,"scratchRowsHidden":9,"normalConversationsPreserved":true}`
+  - `npm run build` → `✓ built in 2.58s` (`dist/assets/index-B_6vxOOa.js` 433.29 kB, `index-YBSTmYxd.css` 52.24 kB, `guiProbe-djswdxyz.js` 45.64 kB — 프런트를 건드리지 않아 해시 동일)
+  - Rust 경고는 기존 2건(`agents.rs`의 `Authenticated`·`Required`·`Error`, `Ready` 미사용 variant)뿐이고 새 경고는 없어.
+- 신규 테스트 내용: 요구사항 2건을 한 번에 전달하면 `revision`이 **1만** 증가하고 두 메시지가 모두 `delivered` + 같은 `thread_id`/`turn_id`가 되며 `pending_requirements`가 비는지, 세 번째 요구사항과 없는 ID를 함께 넘기면 오류가 나고 **세 번째 메시지가 `queued`·`thread_id`/`turn_id` 없음으로 그대로**이며 `revision`도 변하지 않고 여전히 대기 1건으로 남는지(부분 쓰기 없음), 빈 `turn`·빈 `thread`는 거절되고 빈 배치는 `Ok`이면서 `revision`을 올리지 않는지 확인해. 저장소 계층만 검사해.
+- 이번 결과는 Rust 단위·분류 회귀 검사야. 실제 Codex App Server가 `request_arch_review`를 호출해 이 봉투를 받는 경로, 실제 WebView의 전달 상태 표시, 실제 프로세스가 두 쓰기 사이에서 죽는 상황은 확인하지 않았어. `python scripts/verify_*.py`와 데스크톱 빌드는 실행하지 않았어(변경이 Rust 백엔드이고 실행 중인 앱을 건드리지 않으려고).
+- 남은 문제: (a) 1단계 잔여 4건(GUI 실행 확인, `tauri-plugin-single-instance` 내부 경합, 원본 세션 전역 잠금=**승인 대기**, 종료 중 거절의 WebView 재현)은 그대로 차단 상태야. (b) OpenCode 턴에서 CLI가 답을 만든 뒤 확정이 실패하면 그 답변 텍스트는 여전히 저장되지 않아(중단된 턴의 답변을 남길지 여부는 UX 결정이 필요해). (c) `delivery`는 여전히 갱신 행 수를 확인하지 않는 무음 성공 함수야 — 남은 호출부는 `engine.rs`의 `@arch` 직접 질문 경로 한 곳이고 `let _ =`로 결과를 버리는 의도적 best-effort야(전달 실패해도 리뷰는 진행). 이 경로를 엄격하게 바꾸려면 `@arch` 질문이 실패했을 때 사용자에게 어떻게 보여줄지 UX 결정이 먼저 필요해.
+- 다음 작업: (b)의 답변 보존 여부 결정, 또는 `@arch` 직접 질문 경로의 `delivery` 실패 처리 방침 결정. 2단계 Mock 체크리스트는 "단일 worker 직렬성"만 `AppHandle` 의존이라 단위 검사로 닫을 수 없는 상태야.
+
+## 외부 세션 연결의 무음 성공 제거 (2026-10-25)
+
+- 선택한 작업: 1단계(기존 기능 안정화) 잔여 항목 중 지난 회차가 남긴 "`bind_codex_session` 무음 성공". 이 함수는 `UPDATE chat_sessions SET thread_id=?,codex_session_id=? WHERE id=?`의 갱신 행 수를 보지 않고 `meta.revision`을 올린 뒤 `Ok(())`를 돌려줬어. 세션 행이 없으면 아무것도 저장되지 않았는데 호출부는 성공으로 처리했고, 반대로 정상 저장 때도 `thread_id`가 snapshot에 포함되는데 revision을 같은 트랜잭션에서 올리지 않아 두 문장 사이에 실패하면 화면이 이전 thread를 계속 보여줄 수 있었어. `tool_state`·`status`·`confirm_tool`에서 이미 제거한 무음 성공 유형의 마지막 남은 하나야.
+- 변경 파일:
+  - `mvp-app/src-tauri/src/workspace.rs` — `bind_codex_session`이 빈 `id`·`thread`·`session`을 거절하고, 갱신을 `db.transaction()` 안에서 수행해 갱신 행이 정확히 1이 아니면 `세션을 찾을 수 없습니다` 오류를 반환해. `meta.revision` 증가는 같은 트랜잭션에서 갱신이 성립한 뒤에만 일어나고, 커밋도 그 안에서 끝나. 회귀 테스트 1개 추가.
+- 동작 보존: `chat_sessions` 스키마·`user_version=6`, `thread_id`/`codex_session_id`에 쓰는 값, `tool_deliveries`, Blocking Delegation, `request_arch_review`, `archReview`/`latestUserRequirements` 구조적 분리, 종료 순서와 접수 차단, Arch 타임아웃 120초(범위 30~600), 단일 worker는 변경하지 않았어. 두 호출부(`engine.rs`의 Codex 연결 확립 직후, `commit_opencode_answer`의 OpenCode 마감)는 모두 직전에 `store.session(...)`으로 세션 존재를 확인한 뒤 호출하므로 정상 경로의 쓰기 값·순서는 그대로야. 바뀐 것은 "행이 없을 때 조용히 성공" 대신 오류를 돌려주고, 성공 시 `meta.revision`이 함께 오른다는 점뿐이야.
+- 검증 (실제 출력):
+  - `npm test` → `test result: ok. 62 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.73s` (기존 61 + 신규 1, `workspace::tests::binding_an_external_session_reports_misses_instead_of_storing_nothing ... ok`)
+  - `node scripts/verify_external_threads.mjs` → `{"passed":true,"recordedRows":27,"scratchRowsHidden":9,"normalConversationsPreserved":true}`
+  - `npm run build` → `✓ built in 3.53s` (`dist/assets/index-B_6vxOOa.js` 433.29 kB, `index-YBSTmYxd.css` 52.24 kB, `guiProbe-djswdxyz.js` 45.64 kB)
+  - Rust 경고는 기존 3건(`agents.rs`의 미사용 variant)과 cargo의 증분 디렉터리 lock 삭제 경고 1건뿐이고 `workspace.rs` 관련 새 경고는 없어.
+- 신규 테스트 내용: 세션을 만들고 바인딩하면 `thread_id`·`session_id`가 저장되고 snapshot `revision`이 증가하는지, 없는 세션 ID로 호출하면 오류가 나며 revision이 그대로이고 기존 바인딩이 유지되는지, 빈 thread·공백 session ID도 같은 방식으로 거절되는지, 재개방 후에도 바인딩이 남는지를 확인해. 저장소 계층만 검사해.
+- 이번 결과는 Rust 단위·분류 회귀 검사야. 실제 Codex App Server 연결에서 `bind_codex_session`이 호출되는 경로, 실제 OpenCode 턴 마감, 실제 WebView의 thread 표시 갱신은 확인하지 않았어. `python scripts/verify_*.py`와 데스크톱 빌드는 실행하지 않았어(변경이 Rust 백엔드이고 실행 중인 앱을 건드리지 않으려고).
+- 남은 문제: (a) 1단계 잔여 4건(GUI 실행 확인, `tauri-plugin-single-instance` 내부 경합, 원본 세션 전역 잠금=**승인 대기**, 종료 중 거절의 WebView 재현)은 그대로 차단 상태야. (b) OpenCode 턴에서 CLI가 답을 만든 뒤 확정이 실패하면 그 답변 텍스트는 여전히 저장되지 않아(중단된 턴의 답변을 남길지 여부는 UX 결정이 필요해). (c) `bind_messages`는 여전히 갱신 행 수를 확인하지 않아 같은 무음 성공 유형이 남아 있어(호출 경로상 방금 만든 메시지 ID만 넘어와 실제 실패 가능성은 낮아).
+- 다음 작업: (b)의 답변 보존 여부를 결정하거나, `bind_messages`의 무음 성공을 같은 방식으로 정리. 2단계 Mock 체크리스트는 "단일 worker 직렬성"만 `AppHandle` 의존이라 단위 검사로 닫을 수 없는 상태야.
+
+## OpenCode 턴 확정 순서 수정 — 취소된 턴이 외부 세션을 옮기지 않게 (2026-10-25)
+
+- 선택한 작업: 1단계(기존 기능 안정화) 범위의 OpenCode Lead 턴 마감 순서. `engine.rs`의 `opencode_turn`은 CLI 답변을 받은 뒤 **먼저** `bind_codex_session`으로 `chat_sessions.thread_id`·`codex_session_id`를 새 외부 세션으로 옮기고, **그다음** `confirm_turn_start`로 사용자 메시지의 턴 결합을 확정했어. `confirm_turn_start`는 `delivery='queued'`인 행만 갱신하고 아니면 오류를 돌려주므로, CLI가 답하는 사이에 사용자가 중단해 메시지가 `cancelled`가 되면 (1) 외부 세션 포인터는 이미 새 세션으로 이동하고 (2) 답변은 저장되지 않아. 그 결과 다음 턴은 로컬 기록에 없는 답변을 포함한 외부 세션을 이어쓰게 돼 로컬 기록과 CLI 맥락이 어긋났어.
+- 변경 파일:
+  - `mvp-app/src-tauri/src/engine.rs` — 마감 3단계를 `commit_opencode_answer(store, session_id, user_id, answer) -> Result<()>`로 분리하고 순서를 `confirm_turn_start` → `bind_codex_session` → 답변 저장으로 바꿨어. `opencode_turn`은 이 함수를 호출하고 이어서 `state(..., "completed")`를 수행해. 성공 경로에서 쓰는 행과 값은 이전과 같아(같은 메시지 2건, `main`/`answer`/`delivered`, 같은 `thread_id`·`codex_session_id`). 회귀 테스트 2개 추가.
+- 동작 보존: Blocking Delegation, `request_arch_review`, `archReview`/`latestUserRequirements` 구조적 분리, `tool_deliveries` 상태 전이, 종료 순서, Arch 타임아웃 120초(범위 30~600), 단일 worker, DB 스키마·`user_version=6`, 사용자 메시지·세션·컨텍스트는 변경하지 않았어. 바뀐 것은 취소로 확정이 실패할 때 외부 세션 포인터를 건드리지 않는다는 점뿐이야.
+- 검증 (실제 출력):
+  - `npm test` → `test result: ok. 61 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.46s` (기존 59 + 신규 2, `engine::opencode_commit_tests::a_finished_turn_binds_the_external_session_and_stores_the_answer ... ok`, `engine::opencode_commit_tests::a_cancelled_turn_neither_moves_the_external_session_nor_stores_an_answer ... ok`)
+  - `node scripts/verify_external_threads.mjs` → `{"passed":true,"recordedRows":27,"scratchRowsHidden":9,"normalConversationsPreserved":true}`
+  - `npm run build` → `✓ built in 2.38s` (`dist/assets/index-B_6vxOOa.js` 433.29 kB, `index-YBSTmYxd.css` 52.24 kB, `guiProbe-djswdxyz.js` 45.64 kB)
+  - 경고는 기존 2건(`agents.rs`의 `Authentication`·`Availability` 미사용 variant)뿐이고 새 경고는 없어.
+- 신규 테스트 내용: (1) 정상 턴에서 `chat_sessions.thread_id`·`codex_session_id`가 외부 세션 ID로 저장되고, 사용자 메시지가 `delivered`+턴 결합되며, 답변이 `opencode`/`main`/`delivered`로 1건 추가되는지 확인해. (2) `cancel_queued`로 메시지를 `cancelled`로 만든 뒤 마감하면 오류가 나고 `thread_id`는 `None`, `codex_session_id`는 빈 값 그대로이며 답변 메시지가 생기지 않는지 확인해. 저장소·순수 함수 계층만 검사해.
+- 이번 결과는 Rust 단위 회귀 검사야. 실제 OpenCode CLI가 답하는 도중 중단을 걸어 이 경합을 재현한 것은 아니고, `opencode_turn`의 배선(어느 시점에 함수를 부르는지)은 컴파일과 코드 확인으로만 검증했어. 실제 WebView·`python scripts/verify_*.py`·데스크톱 빌드는 실행하지 않았어(변경이 Rust 백엔드이고 실행 중인 앱을 건드리지 않으려고).
+- 지난 회차가 제안한 "Mock에 프로세스 종료 불명확 시나리오 추가"는 **하지 않았어**. 그 경로는 이미 `cli.rs`의 실제 stdio 상대 검사(`mock_stdio_keeps_one_tool_reply_on_the_original_rpc_id`: 쓰기 실패 후 `call-2` 행이 `unknown`, 재전송 없음)와 `characterization_tests::review_records_and_tool_delivery_survive_restart_without_replaying_open_call`(재시작 후 `unknown`)이 더 강한 형태로 덮고 있어. Mock에 같은 전이를 흉내 내면 Mock 자신의 동작을 검사하는 중복이 되고 실제 어댑터 증거로 오인될 수 있어서 추가하지 않았어.
+- 남은 문제: (a) 1단계 잔여 4건(GUI 실행 확인, `tauri-plugin-single-instance` 내부 경합, 원본 세션 전역 잠금=**승인 대기**, 종료 중 거절의 WebView 재현)은 그대로 차단 상태야. (b) OpenCode 턴에서 CLI가 답을 만든 뒤 확정이 실패하면 그 답변 텍스트는 여전히 저장되지 않아(중단된 턴의 답변을 남길지 여부는 UX 결정이 필요해). (c) `bind_codex_session`은 세션 행이 없어도 조용히 성공하는 `UPDATE`야(호출 경로상 유효한 세션만 오지만 무음 성공 유형이 남아 있어).
+- 다음 작업: (a)의 4건 중 사용자 환경 확인이 필요한 항목 정리, 또는 (b) 중단된 OpenCode 턴의 답변 보존 여부 결정. 2단계 Mock 체크리스트는 "단일 worker 직렬성"만 `AppHandle` 의존이라 단위 검사로 닫을 수 없는 상태야.
+
+## 공개 답변 스트림의 Mock 검증과 늦은 턴 이벤트 차단 (2026-10-25)
+
+- 선택한 작업: 1단계 회귀 표의 "Codex 사용자 턴" 중 **공개 답변 스트림 경로**, 그리고 2단계 Mock Agent 체크리스트의 "공개 답변"·"늦은 응답" 항목. `engine.rs`의 `codex_turn`은 `item/started`·`item/agentMessage/delta`·`item/completed`를 인라인으로 처리하면서 스레드/턴 일치를 분기마다 따로 비교했어. 이 판정이 `Engine`(AppHandle) 안에 있어 단위 테스트가 닿지 않았고, 그래서 "늦은 턴 이벤트가 현재 답변에 섞이지 않는다"는 계약에는 회귀 검사가 없었어. Mock Agent도 공개 답변 이벤트를 만들지 못해 그 경로를 스크립트로 재현할 수 없었어.
+- 변경 파일:
+  - `mvp-app/src-tauri/src/engine.rs` — `apply_stream_event(streams, store, event, thread, turn, session) -> Result<bool>` 추가. `threadId`/`turnId`가 현재 턴과 다르면 `Ok(false)`로 버리고, `agentMessage` 항목만 초안에 반영하며, 저장된 대화가 바뀌었는지(`changed`)를 돌려줘. `codex_turn`의 세 분기가 이 함수를 호출하도록 교체했고 `emit` 조건과 `dynamicToolCall` 확인 순서는 그대로야.
+  - `mvp-app/src-tauri/src/mock_agent.rs` — `MockAgent::with_public_answer`(기본값 false) 추가. 실제 App Server가 보내는 순서(`item/started` → `item/agentMessage/delta` → 도구 호출 → `item/completed` → `turn/completed`)를 스크립트로 만들고, 회귀 테스트 1개 추가.
+- 동작 보존: Blocking Delegation, `request_arch_review`, `archReview`/`latestUserRequirements` 구조적 분리, `tool_deliveries`, 종료 순서, Arch 타임아웃 120초(범위 30~600), `tool_state`·`status` 반환 계약, DB 스키마·`user_version=6`, 사용자 메시지·세션·컨텍스트는 변경하지 않았어. 이벤트 종류별 처리 결과(초안 시작/델타 누적/완료 확정, `agentMessage` 이외 항목 무시, 턴 불일치 시 무시)는 이전과 같고, 이전 코드가 `turn_id=None`에서 `json!(null)` 비교로 통과하던 경로는 이제 빈 턴으로 처리돼 불일치로 떨어져(패닉 가능 경로 제거) 더 안전한 쪽으로만 달라.
+- 검증 (실제 출력):
+  - `npm test` → `test result: ok. 59 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.44s` (기존 58 + 신규 1, `mock_agent::tests::scripted_public_answer_reaches_the_stream_and_a_late_turn_is_dropped ... ok`)
+  - `node scripts/verify_external_threads.mjs` → `{"passed":true,"recordedRows":27,"scratchRowsHidden":9,"normalConversationsPreserved":true}`
+  - `npm run build` → `✓ built in 2.46s` (`dist/assets/index-B_6vxOOa.js` 433.29 kB, `index-YBSTmYxd.css` 52.24 kB, `guiProbe-djswdxyz.js` 45.64 kB)
+  - 경고는 기존 2건(`agents.rs`의 `Authentication`·`Availability` 미사용 variant)뿐이고 새 경고는 없어.
+- 신규 테스트 내용: Mock Lead가 스크립트한 이벤트를 `apply_stream_event`로 순서대로 넣어 (1) `item/started`는 저장을 바꾸지 않고, (2) 델타가 `main` 채널 `streaming` 메시지를 만들고, (3) 도구 호출 이벤트는 공개 답변으로 취급되지 않아 메시지를 만들지 않고, (4) `item/completed`가 권위 텍스트로 확정해 `mock public answer`/`delivered` 한 건만 남는지 확인해. 이어서 2턴이 현재일 때 1턴의 늦은 델타·완료 이벤트를 넣어 저장이 늘지 않고 `late` 텍스트가 섞이지 않는지, 같은 2턴의 정상 델타는 두 번째 메시지(`mock public `, `streaming`)로 들어가는지 확인해.
+- 이번 결과는 Rust 단위·Mock 회귀 검사야. 실제 Codex App Server가 이 이벤트를 보내는 경로, 실제 WebView의 답변 스트리밍 표시는 확인하지 않았어. `codex_turn`의 배선(어느 분기에서 함수를 부르고 언제 `emit`하는지)은 컴파일과 코드 확인으로만 검증했어. `python scripts/verify_*.py`와 데스크톱 빌드는 실행하지 않았어(변경이 Rust 백엔드이고 실행 중인 앱을 건드리지 않으려고).
+- 1단계 잔여 4건(GUI 실행 확인, 플러그인 내부 경합, 원본 세션 전역 잠금=**승인 대기**, 종료 중 거절의 WebView 재현)은 지난 회차와 같이 이 환경에서 완결 불가라 그대로 차단 상태야. 이번 작업은 그 4건과 독립적인 회귀 보강이라 1단계 범위 안에 있어.
+- 남은 문제: (a) 위 4건 그대로. (b) Mock은 공개 답변·늦은 이벤트만 재현하고, 인증 불명·프로세스 종료 불명확·`tool_deliveries` 상태 전이는 여전히 `cli.rs`/`store.rs` 테스트가 담당해 Mock 경로로는 검증되지 않아. (c) `Streams`의 40ms flush 스로틀 때문에 델타 반환값은 타이밍에 따라 달라져, 테스트는 반환값 대신 저장 결과로 판정해.
+- 다음 작업: Mock에 "프로세스 종료 불명확(exit unknown)" 시나리오를 추가해 `tool_deliveries`가 `unknown`으로 남는 경로를 Mock 경로에서도 확인하거나, 남은 1단계 차단 항목 중 사용자 환경 확인이 필요한 것을 정리.
+
+## 1단계 자동화 가능 항목 완료 확인과 잔여 항목 차단 상태 (2026-10-25)
+
+- 선택한 작업: 로드맵 1단계(기존 기능 안정화)의 자동화 환경에서 완결 가능한 항목이 모두 끝났는지 현재 트리를 재확인. 1~9회차까지 종료 접수 차단 확장, 무음 성공 제거(`tool_state`/`status`/`confirm_tool`), 등록·해제 snapshot 반영, 고아 `agents` 행 정리, 배지·목록 불일치, 리뷰 응답 봉투의 요구사항 단일 읽기까지 단위 검증 가능한 결함을 모두 고쳤음. 이번 회차는 코드를 더 안 고치고 세 가지 검증 명령으로 기준선을 다시 돌림(이전 실행이 중단된 뒤 시간이 흘러 재확인 가치가 있음).
+- 변경 파일: 없음(코드 변경 없음). `docs/PROGRESS.md` 항목만 추가.
+- 검증 (실제 출력):
+  - `npm test` → `test result: ok. 58 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.69s`
+  - `node scripts/verify_external_threads.mjs` → `{"passed":true,"recordedRows":27,"scratchRowsHidden":9,"normalConversationsPreserved":true}`
+  - `npm run build` → `✓ built in 3.15s` (`dist/assets/index-B_6vxOOa.js` 433.29 kB, `index-YBSTmYxd.css` 52.24 kB, `guiProbe-djswdxyz.js` 45.64 kB)
+- 이번 결과는 1~9회차가 쌓은 단위·분류 회귀의 재통과야. 신규 코드 없이 기준선만 확인했으므로 새 동작 증거는 없어.
+- 1단계 잔여 항목 4건은 모두 이 자동화 환경에서 완결 불가라 차단 상태로 둠:
+  1. **GUI 실행 확인**(중복 실행 시 기존 창 전환·정상 종료 후 `msedgewebview2` 잔존 여부) — 이 환경의 WebView2 초기화 실패로 창이 뜨지 않아 증거 생성 불가. → 사용자 실제 환경에서 확인 필요.
+  2. **플러그인 내부 경합**(`tauri-plugin-single-instance` 2.5.4의 `FindWindowW` 경합) — 플러그인 내부 한계. → 별도 IPC 보강은 요구사항(플러그인 사용)과 충돌해 미착수.
+  3. **원본 세션 전역 잠금**(동시 사용 차단) — 구조 변경 + DB 스키마 변경 후보. → 안전 정책상 **승인 대기**, 임의 착수 안 함.
+  4. **"종료 중 거절"의 실제 WebView 재현 경로** — WebView2 초기화 실패로 증거 생성 불가(직전 회차 시도 후 전부 revert). → 사용자 환경 확인 필요.
+- 앞 단계(1단계)가 완전히 검증되지 않아 2단계(Mock Agent 검증)로 넘어가지 않음. 단 Mock Agent 자체는 이미 `#[cfg(test)]`로 8개 계약 테스트를 갖추고 `npm test`에 포함돼 있어 추가 검증 공백은 아님.
+- 다음 작업: 위 4건 중 사용자가 (a) 실제 GUI 환경에서 1·4번을 확인하거나, (b) 전역 잠금 설계를 승인하면 해당 항목을 착수. 승인·환경 없이는 1단계에서 무리하게 진행할 코드 변경은 없음.
+
+## 리뷰 응답 봉투의 요구사항 버전·목록 단일 읽기 (2026-10-25)
+
+- 선택한 작업: 로드맵 1단계(기존 기능 안정화) 잔여 항목 중 Blocking Delegation 응답 봉투의 최신 요구사항 정합성. `engine.rs`는 `latestUserRequirements.messages`를 `store.snapshot()`에서 뽑고, `latestUserRequirements.conversationVersion`과 `reviewIsStale`을 각각 **다른** `session_version()` 호출로 읽었어. 사용자 입력은 Tauri command 스레드에서 별도로 커밋되므로 그 사이에 새 메시지가 들어오면 봉투의 두 절반이 서로 다른 대화 버전을 가리킬 수 있었어(버전 N+1인데 `messages`가 비어 있거나, 반대로 `messages`에 들어간 요구사항이 `reviewIsStale` 계산에 반영되지 않음). `archReview`와 `latestUserRequirements`를 구조적으로 분리하고 `reviewIsStale`을 보존한다는 계약을 코드 한 곳에서 보장하도록 고쳤어.
+- 변경 파일: `mvp-app/src-tauri/src/store.rs`(`pending_requirements(session) -> Result<(i64, Vec<Message>)>` 추가 — 한 번의 DB 락 안에서 세션 버전과 `queued` 사용자 메시지를 함께 읽고 `substr(content,1,6)!='@arch '`로 `@arch` 직접 질문을 제외, 회귀 테스트 1개), `mvp-app/src-tauri/src/engine.rs`(봉투 조립을 순수 함수 `review_envelope(review, review_version, requirements_version, pending)`로 분리하고 `codex_turn`이 이를 사용, 회귀 테스트 1개).
+- 동작 보존: 봉투의 키 이름·구조(`kind`, `archReview`, `latestUserRequirements{conversationVersion,messages}`, `reviewIsStale`, `processingOrder`)와 `processingOrder` 순서, `@arch` 제외 규칙, 봉투 전송 후 `bind_messages` + `delivery("delivered")` 순서는 그대로야. Blocking Delegation(같은 RPC 호출에 결과 반환), 열린 도구 호출 유지, `tool_deliveries` 상태 전이, 종료 순서, Arch 타임아웃 120초(범위 30~600), DB 스키마·`user_version=6`, 사용자 메시지·세션·컨텍스트는 변경하지 않았어. 바뀐 것은 두 값이 같은 읽기에서 나온다는 점뿐이고, 경합이 없을 때의 결과 값은 이전과 같아. `store.snapshot()` 전체 읽기가 사라져 메시지 전체를 매 리뷰마다 복사하던 비용도 없어졌어.
+- 검증 (실제 출력):
+  - `npm test` → `test result: ok. 58 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.51s` (기존 56 + 신규 2, `store::tests::pending_requirements_share_one_version_and_skip_arch_and_foreign_sessions ... ok`, `engine::envelope_tests::review_and_latest_requirements_stay_separate_with_an_explicit_staleness_flag ... ok`)
+  - `node scripts/verify_external_threads.mjs` → `{"passed":true,"recordedRows":27,"scratchRowsHidden":9,"normalConversationsPreserved":true}`
+  - `npm run build` → `✓ built in 2.31s` (`dist/assets/index-B_6vxOOa.js` 433.29 kB, `index-YBSTmYxd.css` 52.24 kB, `guiProbe-djswdxyz.js` 45.64 kB)
+- 신규 테스트 내용: `pending_requirements`는 세션 버전과 `queued` 사용자 메시지만 돌려주고 `@arch` 직접 질문과 다른 세션의 대기 입력을 제외하며, `delivered`로 바꾸면 목록이 비고 세션 버전은 그대로인지(전달은 `chat_sessions.version`을 올리지 않음), 없는 세션은 오류인지를 확인해. 봉투 테스트는 버전이 같으면 `reviewIsStale=false`이고 `latestUserRequirements`가 비어 있어도 키가 존재하는지, 버전이 다르면 `reviewIsStale=true`이면서 늦은 요구사항이 `latestUserRequirements.messages`에 `queued` 상태로 들어가고 `archReview`에는 `messages`·`latestUserRequirements`가 섞이지 않는지, `processingOrder`가 `["latestUserRequirements","archReview"]`인지를 확인해. 저장소·순수 함수 계층만 검사해.
+- 이번 결과는 Rust 단위 회귀 검사야. 실제 Codex App Server가 `request_arch_review`를 호출해 이 봉투를 받는 경로, 실제 WebView의 협업 패널 표시는 확인하지 않았어. `python scripts/verify_*.py`와 데스크톱 빌드는 실행하지 않았어(변경이 Rust 백엔드이고 실행 중인 앱을 건드리지 않기 위해). 두 번의 읽기 사이에 메시지가 끼어드는 경합 자체를 테스트로 재현한 것은 아니고, 값이 한 읽기에서 나온다는 구조와 봉투 조립 결과만 검사했어.
+- 남은 문제: (a) 중복 실행 수정의 실행 확인(두 번째 실행이 기존 창을 앞으로 가져오는지, 정상 종료 후 `msedgewebview2` 잔존 여부)은 여전히 사용자 환경 확인이 필요해. (b) `tauri-plugin-single-instance` 2.5.4의 `FindWindowW` 경합은 플러그인 내부 한계로 남아 있어. (c) 원본 세션 전역 잠금 설계는 **승인 대기**. (d) "종료 중 거절"의 실제 WebView 재현 경로는 이 자동화 환경의 WebView2 초기화 실패로 만들지 못한 상태 그대로야.
+- 다음 작업: `verify_live.py`로 실제 Arch 리뷰 봉투 수신을 한 번 확인하거나(실제 CLI 사용량·원본 저장소 부작용 있음), 남은 1단계 항목 정리 후 2단계(Mock Agent 검증) 체크리스트의 미검증 항목(`reviewIsStale`·`latestUserRequirements`는 이번에 저장소·봉투 계층까지 확보)을 실제 어댑터 경로로 좁혀 확인.
+
+## 중복 실행 시 검은 창·렌더링 실패 대응 (2026-10-25)
+
+- 선택한 작업: 사용자가 보고한 "여러 번 실행하면 창이 검게 나오거나 렌더링이 안 되고, 강제 종료를 반복하면 `%LOCALAPPDATA%\local.esh.conversation\EBWebView` 프로필이 오염된다" 문제. 코드로 확인한 결과 **단일 인스턴스 장치가 전혀 없었어**(`grep -rn "single_instance\|CreateMutex"` 결과 0건). 두 번째 프로세스가 같은 앱 식별자로 WebView2 user data 폴더를 동시에 잡고, 강제 종료로 남은 `msedgewebview2` 자식이 폴더를 쥔 채 새 인스턴스가 뜨는 경로가 그대로 열려 있었어.
+- 원인 판정: (1) 중복 실행 = **맞음**. 두 프로세스가 동일 프로필을 동시에 연다. (2) `tauri.conf.json`의 `visible:false` = **재현 안 됨**. 현재 설정은 `{"label":"main","title":"ESH · AI 협업","width":1600,"height":900,"minWidth":900,"minHeight":600,"center":true,"zoomHotkeysEnabled":true}`로 `visible` 키 자체가 없어. 다만 설정 실수로 창이 숨는 경로를 코드로 막으라는 요구에 따라 `setup`에서 `show()`를 명시 호출. (3) 이전 프로세스의 WebView2 자식이 폴더를 잠금 = (1)의 결과이자 강제 종료의 잔재. 단일 인스턴스로 새 인스턴스가 프로필을 열기 전에 종료시키는 방식으로 함께 막았어.
+- 변경 파일: `mvp-app/src-tauri/Cargo.toml`(`tauri-plugin-single-instance = "2"` 추가, 해석된 버전 2.5.4), `mvp-app/src-tauri/src/main.rs`(빌더의 **첫 플러그인**으로 단일 인스턴스 등록 — 두 번째 실행은 콜백에서 `unminimize`/`show`/`set_focus`만 수행하고 종료, `setup`에서 `window_state::restore` 뒤 `window.show()` 명시 호출), `mvp-app/src-tauri/Cargo.lock`.
+- 동작 근거(코드 확인, 실행 검증 아님): Tauri 2.12.4 `app.rs`에서 `initialize_plugins()`가 `build()`의 마지막 단계(2607행)이고 설정 창 생성·사용자 `setup`은 `run()`의 `setup(self)`(1529행)에서 일어나. 즉 두 번째 인스턴스는 **창 생성과 `Engine::start`(SQLite `Store::open`) 이전에** 종료되므로 기존 창·세션·DB를 건드리지 않아. 플러그인 문서도 "The second instance never reaches `tauri::Builder::run`"이라고 명시해. 단일 인스턴스 잠금은 앱 식별자 `local.esh.conversation` 기반 named mutex이고, `RunEvent::Exit`에서 해제돼. 우리 코드에는 `std::process::exit` 호출이 없고 종료는 전부 `app.exit(0)`(main.rs 233·312행)이라 뮤텍스가 남지 않아.
+- 종료 정리 확인: 기존 경로는 `CloseRequested` → `prevent_close` → `closing` 중복 방지 → `engine.shutdown()`(접수 차단 → worker 중지 → 최대 25초 대기) → 실패 시 `codex` 상태 `unknown` + `checkpoint` → `app.exit(0)`. 종료 확인 실패를 성공으로 바꾸는 코드는 없어. Codex·OpenCode·Arch 자식 프로세스는 모두 `kill_on_drop(true)`(cli.rs 128·545·630, opencode.rs 38·86)로 스폰돼 프로세스 종료 시 함께 정리되고, WebView2 자식은 `app.exit(0)`에서 Tauri가 웹뷰를 드롭하며 끝나. **이 정리 동작 자체를 실제 실행으로 관측하지는 않았어**(아래 검증 한계).
+- 검증 (실제 출력):
+  - `npm test` → `test result: ok. 56 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.68s`
+  - `node scripts/verify_external_threads.mjs` → `{"passed":true,"recordedRows":27,"scratchRowsHidden":9,"normalConversationsPreserved":true}`
+  - `npm run build:desktop` → 프런트 `✓ built`(`dist/assets/index-B_6vxOOa.js` 433.29 kB, `guiProbe-djswdxyz.js` 45.64 kB) + Rust `Finished \`dev\` profile ... in 18.65s`, 산출물 `mvp-app/src-tauri/target/debug/esh-chat-mvp4.exe` (16,614,400 bytes, 2026-10-25 15:56). 실행 파일 이름은 `esh-chat-mvp4` 하나만 갱신했고 새 이름의 exe는 만들지 않았어. 빌드 경고 2건(`agents.rs`의 `Availability::Ready`·`Authentication` 미사용 variant)은 이번 변경과 무관한 기존 경고야.
+- 검증 한계(중요): 사용자 지시에 따라 GUI를 자동화 환경에서 띄우지 않았어. 따라서 "두 번째 실행이 새 창을 만들지 않고 기존 창을 앞으로 가져오는지"와 "종료 후 WebView2 자식이 남지 않는지"는 **실행으로 확인하지 못했어**. 참고로 이번 회차 초반에 GUI 프로브를 띄웠을 때 창은 `ESH · AI 협업` 제목으로 생성됐지만 devtools로 확인한 `document.getElementById('root').childElementCount`가 `0`, `document.body.innerText`가 빈 문자열이었고 `gui-probe.json`도 만들어지지 않았어(당시 실행 기록: `mvp-app/evidence/shutdown-20261025-153310/`). 이 증상은 앱 코드 결함이 아니라 자동화 환경의 WebView2 초기화 실패로 판단해.
+- 이번 회차에 함께 시도했다가 되돌린 것: "종료 중 명령 거절"을 실제 WebView에서 재현하는 GUI 프로브(`ESH_GUI_PROBE=shutdown` + `begin_shutdown_probe` 명령 + `scripts/verify_shutdown.py`). 위 WebView2 초기화 문제로 증거를 만들 수 없어 커밋하지 않고 전부 되돌렸어. 그 검증 공백은 그대로 남아 있어.
+- 이번 수정으로 새로 생기는 동작(코드 확인, 실행 검증 아님): 첫 인스턴스가 **종료 중**일 때(창을 닫은 뒤 `engine.shutdown()`이 끝날 때까지, 최악 25초) 다시 실행하면 두 번째 프로세스는 뮤텍스가 아직 잠겨 있어 플러그인 콜백만 수행하고 종료돼. 이 구간에서는 **새 창이 뜨지 않고, 곧 첫 인스턴스도 사라져** 사용자에게는 "실행했는데 아무 일도 안 일어남"으로 보여. 수정 전에는 이 구간에 두 번째 앱이 떴으니 새로 생긴 제약이야. 정상 종료(수 초)에서는 거의 겪지 않지만, 확인할 때 헷갈릴 수 있어 기록해 둬. 이 구간까지 없애려면 두 번째 실행이 첫 인스턴스 종료를 기다렸다가 인계받아야 하는데, 그건 뮤텍스 소유권을 플러그인 밖에서 직접 관리해야 해서 요구사항(플러그인 사용)과 충돌해 이번에는 하지 않았어.
+- 남은 문제: (a) 위 두 가지 실행 확인은 사용자 환경에서 필요해. (b) `tauri-plugin-single-instance` 2.5.4의 Windows 구현은 뮤텍스를 잡은 뒤 첫 인스턴스의 메시지 창을 `FindWindowW`로 찾지 못하면(동시 실행 경합) 두 번째도 그대로 진행해. 이 경합은 플러그인 내부 한계로, 이번 변경에서 별도 IPC를 덧붙이지 않았어. (c) 원본 세션 전역 잠금 설계는 여전히 **승인 대기**.
+- 다음 작업: 사용자가 실제 환경에서 2회 연속 실행·정상 종료 후 `msedgewebview2` 잔존 여부를 확인. 문제가 남으면 (b) 경합 보강을 별도 항목으로 설계.
+
+## 에이전트 배지 개수와 목록 불일치 정리 (2026-10-25)
+
+- 선택한 작업: 로드맵 1단계(기존 기능 안정화) 잔여 항목 중 앞선 회차가 남긴 "에이전트 등록·해제와 `agents` 행의 불일치"의 남은 절반. `main.tsx`는 `에이전트` 배지 개수를 `snapshot.agents.length`로 표시하고, `AgentsView`는 builtin 두 개와 `agent_instances`의 모든 사용자 등록을 목록에 그려. 그런데 `register_agent_instance`는 OpenCode Lead(`opencode_cli_json`)일 때만 `agents` 행을 만들었어. 그래서 Claude Code·Gemini CLI처럼 실행 연결이 없는 등록을 추가하면 목록은 3개인데 배지는 2로 남았어. 지난 회차가 "인스턴스가 없는 `agents` 행"을 지워 배지가 부풀던 문제를 고쳤으니, 이번에는 반대 방향(등록이 있는데 상태 행이 없는 경우)을 맞췄어.
+- 변경 파일: `mvp-app/src-tauri/src/registry.rs`(`register_agent_instance`가 모든 등록에 `agents` 행을 한 트랜잭션 안에서 생성, OpenCode Lead는 기존처럼 `idle`/`대기 중`, 실행 연결이 없는 등록은 `unknown`/`실행 연결이 설정되지 않았습니다`, 회귀 테스트 1개), `mvp-app/src-tauri/src/store.rs`(`Store::open`에서 `agent_instances`에 있으나 `agents` 행이 없는 인스턴스를 `INSERT OR IGNORE`로 보충. 기존 상태는 덮어쓰지 않음).
+- 동작 보존: `agents`·`agent_instances`·`chat_sessions` 스키마와 `user_version=6`, 사용자 메시지·세션·컨텍스트, `tool_deliveries`, Blocking Delegation, `request_arch_review`, archReview/latestUserRequirements 분리, 종료 순서와 접수 차단, Arch 타임아웃 120초(범위 30~600)는 변경하지 않았어. 새 DB 마이그레이션은 없어. 지난 회차의 "인스턴스 없는 `agents` 행 삭제"와 재시작 시 `unknown` 복구 갱신은 그대로야. 실행 연결이 없는 등록은 실행 상태를 주장하지 않도록 `idle`이 아니라 `unknown`으로 두고, 목록 라벨은 기존처럼 `지원` 값으로 `미지원`을 표시해.
+- 검증 (실제 출력):
+  - `npm test` → `test result: ok. 56 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.48s` (기존 55 + 신규 1, `registry::tests::every_registration_owns_one_status_row_so_badge_and_list_agree ... ok`)
+  - `node scripts/verify_external_threads.mjs` → `{"passed":true,"recordedRows":27,"scratchRowsHidden":9,"normalConversationsPreserved":true}`
+  - `npm run build` → `✓ built in 2.46s` (`dist/assets/index-B_6vxOOa.js` 433.29 kB, `index-YBSTmYxd.css` 52.24 kB, `guiProbe-djswdxyz.js` 45.64 kB)
+- 신규 테스트 내용: 등록 전 `agents` 2개 → Claude Code(미지원) 등록 후 3개이고 해당 행이 정확히 1개이며 상태가 `unknown`인지, 그 행을 지워 이전 빌드 상태를 흉내 낸 뒤 재개방하면 `Store::open`이 `unknown`/`실행 연결이 설정되지 않았습니다`로 보충하고 builtin `codex`는 `idle`을 유지하는지, 한 번 더 재개방해도 3개로 같은지(멱등), 등록 해제 후 2개로 돌아가는지를 확인해. 저장소 계층만 검사해.
+- 이번 결과는 Rust 단위·분류 회귀 검사야. 실제 Tauri WebView에서 배지 숫자가 3으로 바뀌고 목록 항목 수와 같은지는 확인하지 않았어. `python scripts/verify_*.py`도 실행하지 않았어. 이 worktree의 `mvp-app/src-tauri/target/debug/esh-chat-mvp4.exe`는 15:25에 사용자 요청으로 빌드된 이전 트리 산출물이라 이번 변경을 포함하지 않아. 이번 변경은 Rust 백엔드에 있어 화면 확인에는 재빌드가 필요하고, 방금 만들어진 실행 파일을 덮어쓰지 않으려고 데스크톱 빌드를 실행하지 않았어.
+- 남은 문제: 원본 세션 동시 사용을 막는 전역 잠금은 여전히 없어(구조 변경이라 **승인 대기**). "종료 중 거절"을 실제 WebView에서 재현하는 검증 경로도 아직 없어. 실행 연결이 없는 등록의 `unknown` 상태는 `AgentsView` 상세에서 `상태 확인 필요`로 보이지만 이 화면 문구는 WebView에서 확인하지 않았어.
+- 다음 작업: "종료 중 거절"을 실제 WebView에서 재현하는 검증 경로 마련, 또는 원본 세션 전역 잠금 설계 승인 요청.
+
+## 시작 시 고아 `agents` 행 정리 (2026-10-25)
+
+- 선택한 작업: 로드맵 1단계(기존 기능 안정화) 잔여 항목 중 앞선 회차가 남긴 "시작 시 고아 `agents` 행 정리". 등록 해제는 이제 인스턴스 행과 상태 행을 한 트랜잭션에서 지우지만, 그 수정 이전 빌드가 남긴 상태 행은 지울 경로가 없어 그대로 남았어. `agents`는 레지스트리에서 파생된 실행 상태이고 사용자 데이터가 아니며, 남은 행은 화면 목록에는 나타나지 않는데도 `main.tsx`의 배지 개수(`snapshot.agents.length`)만 부풀렸어.
+- 변경 파일: `mvp-app/src-tauri/src/store.rs`(`Store::open`에서 `agent_instances`에 없는 `agents` 행 삭제, `codex`·`antigravity` 고정 행은 예외, 회귀 테스트 1개).
+- 동작 보존: `agents`·`agent_instances`·`chat_sessions` 스키마와 사용자 메시지·세션·컨텍스트, `tool_deliveries`, Blocking Delegation, `request_arch_review`, archReview/latestUserRequirements 분리, 종료 순서와 접수 차단, Arch 타임아웃 120초(범위 30~600)는 변경하지 않았어. 새 DB 마이그레이션은 없고 `user_version`도 그대로야. 삭제 대상은 "인스턴스가 이미 없는 실행 상태 행"뿐이라 등록된 인스턴스와 builtin 두 행은 유지돼. 정리 후에도 기존 `unknown` 복구 갱신과 `revision` 증가는 그대로 수행돼.
+- 검증 (실제 출력):
+  - `npm test` → `test result: ok. 55 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.68s` (기존 54 + 신규 1, `store::tests::open_drops_status_rows_whose_instance_is_gone ... ok`)
+  - `node scripts/verify_external_threads.mjs` → `{"passed":true,"recordedRows":27,"scratchRowsHidden":9,"normalConversationsPreserved":true}`
+  - `npm run build` → `✓ built in 2.84s` (`dist/assets/index-B_6vxOOa.js` 433.29 kB, `index-YBSTmYxd.css` 52.24 kB)
+- 신규 테스트 내용: 인스턴스가 있는 `inst-keep` 상태 행과 인스턴스가 없는 `inst-orphan` 상태 행을 함께 넣고 재개방하면 `agents`가 `antigravity`, `codex`, `inst-keep` 세 행만 남는지, 메시지가 새로 생기지 않는지, 한 번 더 재개방해도 결과가 같은지(멱등)를 확인해. 저장소 계층만 검사해.
+- 이번 결과는 Rust 단위·분류 회귀 검사야. 실제 Tauri WebView에서 배지 개수가 줄어드는지, 이미 고아 행이 있는 사용자 DB에서 재시작 후 화면이 어떻게 보이는지는 확인하지 않았어. `python scripts/verify_*.py`는 실행하지 않았어.
+- 데스크톱 빌드는 같은 날 사용자 요청으로 별도 실행했어 (`npm run build:desktop`) → `✓ built in 3.05s`(프런트) + `Finished \`dev\` profile [unoptimized + debuginfo] target(s) in 36.07s`, 산출물 `mvp-app/src-tauri/target/debug/esh-chat-mvp4.exe` (16,402,944 bytes, 2026-10-25 15:25). 실행 대상 이름은 `esh-chat-mvp4` 그대로야. 빌드 경고 2건(`agents.rs`의 `Authentication`·`Availability` 미사용 variant)은 이번 변경과 무관한 기존 경고야. 빌드는 컴파일 성공 증거이며 실제 WebView 동작 검증은 아니야.
+- 남은 문제: 원본 세션 동시 사용을 막는 전역 잠금은 여전히 없어. 이 항목은 실행 잠금 정책·충돌 시 동작을 정해야 하는 구조 변경이라 **승인 대기**로 두고 임의로 착수하지 않았어. "종료 중 거절"을 실제 WebView에서 재현하는 검증 경로도 아직 없어.
+- 다음 작업: "종료 중 거절"을 실제 WebView에서 재현하는 검증 경로 마련, 또는 원본 세션 전역 잠금 설계 승인 요청.
+
+## 등록·해제 결과의 snapshot 반영 (2026-10-25)
+
+- 선택한 작업: 로드맵 1단계(기존 기능 안정화) 잔여 항목 중 앞선 회차가 남긴 "등록 해제 시 `agents` 행 정리" 확인. 정리 자체는 `registry.rs`의 `unregister_agent_instance`가 이미 `DELETE FROM agents`로 수행하고 있었지만, 그 삭제가 `agent_instances` 삭제와 별개 문장이라 두 번째 삭제가 실패하거나 그 사이에 프로세스가 죽으면 인스턴스 없는 `agents` 행이 남았어. 게다가 두 store 함수 모두 `meta.revision`을 올리지 않고 Tauri 명령도 `emit()`을 호출하지 않아, 열려 있는 WebView는 삭제된 인스턴스의 상태와 `에이전트` 배지 개수를 다음 무관한 이벤트까지 계속 보여줬어(`main.tsx`의 `snapshot.agents.length`, `AgentsView.tsx`의 `snapshot.agents.find`).
+- 변경 파일: `mvp-app/src-tauri/src/registry.rs`(`register_agent_instance`·`unregister_agent_instance`를 트랜잭션으로 묶고 `meta.revision` 증가, 회귀 테스트 1개), `mvp-app/src-tauri/src/main.rs`(두 명령이 성공 후 `engine.emit()` 호출).
+- 동작 보존: `agent_instances`·`agents` 스키마, 기존 두 builtin 행, `chat_sessions` 참조 검사(사용 중 세션이 있으면 해제 거부), `tool_deliveries`, Blocking Delegation, `request_arch_review`, archReview/latestUserRequirements 분리, 종료 순서와 접수 차단, Arch 타임아웃 120초(범위 30~600)는 변경하지 않았어. 새 DB 마이그레이션은 없고 사용자 메시지·세션·컨텍스트는 건드리지 않아. `emit()`은 실패해도 등록·해제 자체를 되돌리지 않도록 반환값만 전달해.
+- 검증 (실제 출력):
+  - `npm test` → `test result: ok. 54 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.70s` (기존 53 + 신규 1, `registry::tests::registration_and_removal_are_visible_to_snapshot_consumers ... ok`)
+  - `node scripts/verify_external_threads.mjs` → `{"passed":true,"recordedRows":27,"scratchRowsHidden":9,"normalConversationsPreserved":true}`
+  - `npm run build` → `✓ built in 2.76s` (`dist/assets/index-B_6vxOOa.js` 433.29 kB, `index-YBSTmYxd.css` 52.24 kB)
+- 신규 테스트 내용: OpenCode Lead 등록 직후 `revision`이 증가하고 `agents`에 `idle` 행이 생겨 개수가 2→3이 되는지, `status(..., "running", ...)`가 `true`인지, 해제 후 `revision`이 다시 증가하고 해당 `agents` 행이 사라져 개수가 2로 돌아가며 `agent_instances`에도 남지 않고 실행 파일은 그대로인지를 확인해. 저장소 계층만 검사하고 Tauri 명령 배선과 `emit()` 전달은 컴파일과 코드 확인으로만 검증했어.
+- 이번 결과는 Rust 단위·분류 회귀 검사야. 실제 Tauri WebView에서 등록·해제 직후 배지와 상세 패널이 즉시 갱신되는지, 삭제된 인스턴스가 선택된 상태에서 패널이 닫히는지는 확인하지 않았어. `python scripts/verify_*.py`와 데스크톱 빌드는 실행하지 않았어.
+- 남은 문제: 이 수정 이전에 이미 생긴 고아 `agents` 행은 시작 시 정리 경로가 없어 그대로 남아(배지 개수에만 영향) 있어. 원본 세션 동시 사용을 막는 전역 잠금도 여전히 없어.
+- 다음 작업: 시작 시 `agent_instances`에 없는 `agents` 행 정리 여부 결정, 또는 "종료 중 거절"을 실제 WebView에서 재현하는 검증 경로 마련.
+
+## 에이전트 상태의 무음 성공 제거 (2026-10-25)
+
+- 선택한 작업: 로드맵 1단계(기존 기능 안정화) 잔여 항목 중 앞선 회차가 남긴 "`Store::status`의 무음 성공". `status`는 `UPDATE agents ... WHERE id=?`의 갱신 행 수를 보지 않고 `meta.revision`을 올린 뒤 `Ok(())`를 돌려줬어. 세션의 `agent_instance_id`(등록 인스턴스 ID, 예: OpenCode 등록 UUID)로 호출되면 `agents` 표에 해당 행이 없어 아무것도 저장되지 않았는데도 호출부는 저장된 것으로 처리했어. `cancel`·`error`·`state`가 모두 이 경로를 쓰고, `AgentsView.tsx`는 이미 `snapshot.agents`에서 인스턴스 ID로 상태를 찾고 있어 화면에는 값이 없어 `idle`로 대체되고 있었어.
+- 변경 파일: `mvp-app/src-tauri/src/store.rs`(`status`가 `Result<bool>` 반환, 빈 ID 거부, `agents`·`agent_instances`에 있는 ID만 허용, 등록 인스턴스는 `INSERT OR IGNORE`로 `idle` 기준 행을 만든 뒤 갱신, 갱신 행 0개면 `false`·revision 미변경, 회귀 테스트 1개), `mvp-app/src-tauri/src/engine.rs`(`state`·`cancel`이 `false`를 받으면 `agent_status_unmatched` audit 기록, 중단·턴 진행은 그대로 유지).
+- 동작 보존: `agents` 스키마·기존 두 행, `tool_deliveries`, Blocking Delegation, `request_arch_review`, archReview/latestUserRequirements 분리, 종료 순서, Arch 타임아웃 120초(범위 30~600), 기존 세션·메시지·컨텍스트는 변경하지 않았어. 새 DB 마이그레이션은 없고 `agents`에 등록 인스턴스 행이 추가로 생길 수만 있어(기존 행·데이터 삭제 없음). `cli.rs`의 `store.status("antigravity", ...)?`와 정리 경로의 `let _ =` 호출은 반환형 변경만으로 컴파일되며 동작이 같아.
+- 검증 (실제 출력):
+  - `npm test` → `test result: ok. 53 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.68s` (기존 52 + 신규 1, `store::tests::status_reports_whether_it_was_stored ... ok`)
+  - `node scripts/verify_external_threads.mjs` → `{"passed":true,"recordedRows":27,"scratchRowsHidden":9,"normalConversationsPreserved":true}`
+  - `npm run build` → `✓ built in 2.75s` (`dist/assets/index-B_6vxOOa.js` 433.29 kB)
+- 회귀 검사 내용: builtin `codex` 상태는 `true`로 저장되고 snapshot에 반영. `agent_instances`에만 있는 `inst-open-1`은 행이 생성되고 상태가 저장됨. 없는 `ghost-agent`와 공백 ID는 `false`를 반환하고 행을 만들지 않으며 `revision`도 그대로. 이 테스트는 저장소 계층만 검사해요.
+- 이번 결과는 Rust 단위·분류 회귀 검사야. 실제 Tauri WebView에서 OpenCode 세션의 실행 상태가 Agents 화면에 표시되는지, 실제 CLI 턴에서 `agent_status_unmatched`가 남는지는 확인하지 않았어. `python scripts/verify_*.py`와 데스크톱 빌드는 실행하지 않았어.
+- 남은 문제: 원본 세션 동시 사용을 막는 전역 잠금은 여전히 없어. 등록 인스턴스 행이 한 번 생기면 등록 해제 후에도 `agents`에 남아(상태 `unknown`으로 복구될 뿐) 정리 경로가 없어. 이번 변경으로 화면에 인스턴스별 실행 상태가 나타날 수 있지만 WebView 검증은 없어.
+- 다음 작업: "종료 중 생성·가져오기·등록 거절"을 실제 WebView에서 재현하는 검증 경로 마련, 또는 등록 해제 시 `agents` 행 정리 여부 결정.
+
+## 도구 응답 확인의 무음 성공 제거 (2026-10-25)
+
+- 선택한 작업: 로드맵 1단계(기존 기능 안정화) 잔여 항목 중 앞선 회차가 남긴 "`Store::tool_state` 무음 성공, 특히 `confirm_tool`의 `turn_id=None` → `null` 키". `confirm_tool`은 `self.turn_id`가 없을 때 `null`을 포함한 키로 갱신을 시도했고, `tool_state`는 갱신 행이 0개여도 `Ok(())`를 돌려줘 실제로 저장되지 않은 상태를 `confirmed`로, `review_confirmed` audit까지 남길 수 있었어.
+- 변경 파일: `mvp-app/src-tauri/src/store.rs`(`tool_state`가 갱신 행 수 일치 여부를 `bool`로 반환), `mvp-app/src-tauri/src/cli.rs`(`confirm_tool`이 `Result<bool>` 반환, turn ID 없음·행 불일치 시 `review_confirm_unmatched` audit 후 `false`), `mvp-app/src-tauri/src/engine.rs`(`dynamicToolCall` 완료 시 확인이 실제로 성립한 경우에만 `검토 결과를 반영하는 중` 상태로 전환).
+- 동작 보존: `prepared → sent → confirmed/unknown` 상태 값과 `tool_deliveries` 스키마, 재시작 시 `prepared`·`sent` → `unknown` 처리, Blocking Delegation, `request_arch_review`, archReview/latestUserRequirements 분리, 종료 순서, Arch 타임아웃 120초(범위 30~600)는 변경하지 않았어. `resolve_once`의 `sent`·`unknown` 기록은 `reserve_tool` 직후라 행이 보장되므로 호출부를 바꾸지 않았어.
+- 검증 (실제 출력):
+  - `npm test` → `test result: ok. 52 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.69s` (신규 테스트 파일 없이 기존 `cli::tests::mock_stdio_keeps_one_tool_reply_on_the_original_rpc_id`에 회귀 4개 항목 추가)
+  - `node scripts/verify_external_threads.mjs` → `{"passed":true,"recordedRows":27,"scratchRowsHidden":9,"normalConversationsPreserved":true}`
+  - `npm run build` → `✓ built in 3.13s` (`dist/assets/index-B_6vxOOa.js` 433.29 kB)
+- 회귀 검사 내용: 정상 확인은 `true`와 `confirmed` 유지. `turn_id=None`에서 확인 시 `false`·`review_confirmed` audit 수 불변·`review_confirm_unmatched` 1건·`call_key LIKE '%:null:%'` 행 0건. 없는 키에 대한 `tool_state`는 `false`. 기존 `codex_tx` audit 1회·중복 응답 차단·전송 실패 `unknown` 검사도 그대로 통과했어.
+- 이번 결과는 Rust 단위·분류 회귀 검사야. 실제 Codex App Server가 `dynamicToolCall` 완료를 보내는 경로를 실제 CLI로 재현한 검사가 아니고, `python scripts/verify_*.py`와 데스크톱 빌드는 실행하지 않았어. `confirm_tool`이 `false`를 반환하는 상황(턴 ID 소실·키 불일치)은 실제 CLI에서 강제로 만들지 않았어.
+- 남은 문제: 원본 세션 동시 사용을 막는 전역 잠금은 여전히 없어. `Store::status`도 갱신 행 0개를 성공으로 처리해(에이전트 ID가 없으면 조용히 넘어감) 같은 무음 성공 유형이 남아 있어.
+- 다음 작업: `Store::status`의 무음 성공 처리 여부 결정, 또는 "종료 중 생성·가져오기·등록 거절"을 실제 WebView에서 재현하는 검증 경로 마련.
+
+## 종료 접수 차단을 에이전트 등록·해제와 OpenCode 모델 조회까지 확장 (2026-10-25)
+
+- 선택한 작업: 로드맵 1단계(기존 기능 안정화) 잔여 항목 "종료·큐·원본 동시 사용 실패 재현" 중 앞선 회차가 남긴 접수 차단 공백. `register_agent_instance`/`unregister_agent_instance`는 종료 중에도 `agent_instances`·`agents` 행을 쓰거나 지울 수 있었고, `list_opencode_models`는 종료 중에도 단기 OpenCode CLI 프로세스를 새로 띄울 수 있었어.
+- 변경 파일: `mvp-app/src-tauri/src/registry.rs`(명령 진입용 `register_instance`/`unregister_instance`와 회귀 1개), `mvp-app/src-tauri/src/main.rs`(두 등록 명령이 새 함수를 쓰도록 교체, `list_opencode_models` 진입부 검사), `mvp-app/src-tauri/src/engine.rs`(`admission()` 접근자만 추가).
+- 차단 검사를 Tauri 래퍼가 아니라 저장소 호출 바로 옆에 둔 이유는 판정 순서(검사 → 쓰기 없음)를 앱 없이 단위 테스트로 확인하기 위해서야. 기존 `submit`·`request_compact`·`set_model_settings`·`set_opencode_model`의 검사와 오류 문구, shutdown 순서, Blocking Delegation, `tool_deliveries`, Arch 타임아웃 120초(범위 30~600), DB 스키마·사용자 데이터는 변경하지 않았어.
+- 검증 (실제 출력):
+  - `npm test` → `test result: ok. 52 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.62s` (기존 51 + 신규 1)
+  - `node scripts/verify_external_threads.mjs` → `{"passed":true,"recordedRows":27,"scratchRowsHidden":9,"normalConversationsPreserved":true}`
+  - `npm run build` → `✓ built in 2.79s` (`dist/assets/index-B_6vxOOa.js` 433.29 kB)
+- 신규 테스트 `registration_writes_are_refused_while_closing`는 실제 SQLite에 등록 행을 만든 뒤 접수를 닫고, 등록·해제가 `종료 중` 오류로 거절되며 행 수가 변하지 않고 기존 행이 남는지, 이후 호출도 계속 거절되는지를 확인해. 이는 명령 본문이 호출하는 함수 경로를 직접 검사한 것이고, Tauri 명령 배선 자체는 컴파일과 코드 확인으로만 검증했어.
+- 이번 결과는 Rust 단위·분류 회귀 검사야. 실제 Tauri WebView에서 종료 중 명령 경합을 재현한 검사가 아니고, `python scripts/verify_*.py`와 데스크톱 빌드는 실행하지 않았어. OpenCode CLI를 실제로 띄워 종료 중 거절을 확인한 것도 아니야.
+- 남은 문제: 원본 세션 동시 사용을 막는 전역 잠금은 여전히 없어. `Store::tool_state`는 없는 전달 키를 갱신해도 성공을 돌려주고, `confirm_tool`은 `turn_id`가 없을 때 `null` 키로 조회해 조용히 아무 행도 갱신하지 않은 채 `review_confirmed` audit을 남길 수 있어.
+- 다음 작업: "종료 중 생성·가져오기·등록 거절"을 실제 WebView에서 재현하는 검증 경로를 마련하거나, `tool_state`의 무음 성공을 제거할지 결정.
+
+## 종료 접수 차단을 생성·가져오기 명령까지 확장 (2026-10-25)
+
+- 선택한 작업: 로드맵 1단계(기존 기능 안정화) 잔여 항목인 "종료·큐·원본 동시 사용 실패 재현" 중 종료 접수 차단 공백. `submit`만 `accepting`을 검사해서 룸·세션 생성, 외부 세션 목록·가져오기, 모델 목록 command는 종료 중에도 worker job·SQLite 쓰기·단기 Codex 프로세스를 시작할 수 있었어.
+- 변경 파일: `mvp-app/src-tauri/src/engine.rs`(공용 `ensure_accepting` 함수와 `Engine::ensure_accepting`), `mvp-app/src-tauri/src/main.rs`(`create_room`, `create_session`, `list_codex_sessions`, `import_codex_session`, `list_codex_models` 진입부), `mvp-app/src-tauri/src/characterization_tests.rs`(회귀 1개).
+- 기존 `submit`·`request_compact`·`set_model_settings`·`set_opencode_model`의 검사와 오류 문구는 그대로 두었어. shutdown 순서(접수 차단 → worker 중지 → Arch 정리 → Codex 종료 → SQLite 확정), Blocking Delegation, `tool_deliveries`, Arch 타임아웃 120초(범위 30~600)는 변경하지 않았어. 새로 거절되는 경로는 종료 중에만 동작하므로 정상 실행 동작은 그대로야.
+- 검증 (실제 출력):
+  - `npm test` → `test result: ok. 51 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.64s` (기존 50 + 신규 1)
+  - `node scripts/verify_external_threads.mjs` → `{"passed":true,"recordedRows":27,"scratchRowsHidden":9,"normalConversationsPreserved":true}`
+- 이번 결과는 Rust 단위·분류 회귀 검사야. 실제 Tauri WebView에서 종료 중 command 경합을 재현한 검사가 아니고, `python scripts/verify_*.py`와 데스크톱 빌드는 실행하지 않았어. 신규 테스트는 접수 차단 판정 자체만 검사하며 command 배선은 컴파일과 코드 확인으로만 검증했어.
+- 남은 문제: `register_agent_instance`/`unregister_agent_instance`는 여전히 접수 차단 검사가 없어 종료 확정 단계의 SQLite 쓰기와 겹칠 수 있어. 원본 세션 동시 사용을 막는 전역 잠금도 여전히 없어.
+- 다음 작업: 등록·해제 command에도 같은 차단을 적용할지 결정하고, "종료 중 생성·가져오기 거절"을 실제 WebView에서 재현하는 검증 경로를 마련.
+
+## 기준선 확인과 검증 환경 복구 (2026-10-25)
+
+- 로드맵 1단계(기존 기능 안정화) 기준선을 현재 트리에서 다시 확인했어. 코드는 변경하지 않았어.
+- 검증 결과 (실제 출력):
+  - `npm test` → `test result: ok. 50 passed; 0 failed; 0 ignored; finished in 0.66s`
+  - `node scripts/verify_external_threads.mjs` → `{"passed":true,"recordedRows":27,"scratchRowsHidden":9,"normalConversationsPreserved":true}`
+  - `npm run build` → `✓ built in 1.99s` (`dist/index.html` 0.36 kB, `index-B_6vxOOa.js` 433.29 kB)
+- 발견한 문제: worktree에서 `verify_external_threads.mjs`가 `mvp-app/evidence/workspace-20261018-041248/audit.json`을 열지 못해 `ENOENT`로 실패했어. `mvp-app/evidence/`가 gitignore 대상이라 worktree에도 새 클론에도 존재하지 않기 때문이야. `mvp-app/evidence`를 원본 저장소에 junction으로 연결해 통과시켰고, 새 worktree를 만들 때도 같은 연결이 필요해.
+- 이번 결과는 로컬 단위·분류 회귀 검사야. 실제 Codex·Antigravity CLI, Tauri WebView, OpenCode 실행은 하지 않았고 기존 실제 연결 성공 기록을 이번 결과로 재집계하지 않아.
+- 다음 작업: 로드맵 1단계 잔여 항목인 "종료·큐·원본 동시 사용 실패 재현" 중 단위 테스트로 재현 가능한 부분부터 착수.
+
+## 자동화 인계 문서 작성 (2026-10-25)
+
+- `docs/AUTOMATION_HANDOFF.md`를 추가했어. 특정 도구나 프로모션에 종속되지 않도록 "한 회차를 어떻게 수행하는가" 기준으로 정리했고, 붙여넣기용 실행 프롬프트, 검증 명령과 판정 기준, 안전 정책, 도구별 복구 방법, 실측 함정 표를 담았어.
+- 실측 근거: MausBot 루틴은 `access`가 `read-and-draft` 하나로 고정돼 있고 실행 시 파일 쓰기가 차단돼. 테스트 실행에서 루틴 출력이 `쓰기 불가`였고 `D:\프로젝트\ESH-codex\.routine-write-test.txt`는 생성되지 않았어. 그래서 코드 개발 자동화는 WorkBuddy(1시간 간격)가 맡고, MausBot 루틴은 읽기 전용 상태 점검(6시간 간격)으로 용도를 바꿨어.
+- 이번 작업은 문서 추가뿐이라 코드·테스트를 변경하지 않았어. `npm test`를 다시 실행하지 않았고, 직전 회차의 50 passed 기록을 이번 결과로 재집계하지 않아.
+- 다음 작업: 로드맵 1단계 잔여 항목인 "종료·큐·원본 동시 사용 실패 재현" 정리부터 착수.
+
+## 브랜치 동기화와 병합 충돌 해결 (2026-10-25)
+
+- `bot/codex-impl`이 main보다 뒤처져 있어 `git merge main`을 실행했어. `docs/PROGRESS.md`, `mvp-app/src-tauri/src/mock_agent.rs` 두 파일에서 충돌이 났어.
+- 두 충돌 모두 main 쪽을 채택했어. PROGRESS는 OpenCode 항목 3개까지 포함한 최신 기록이었고, `mock_agent.rs`는 취소 채널 송신자를 유지하는 main의 수정이 타임아웃 테스트를 실제로 검증해. 브랜치 커밋 `6578414`의 테스트 분리 내용은 main에 동등한 리팩터가 이미 들어가 중복이었어.
+- 검증: `mvp-app/`에서 `npm test` → **50개 통과, 0개 실패** (`test result: ok. 50 passed; 0 failed`).
+- 이번 실행은 단위 테스트만 돌렸어. 실제 Codex·Antigravity CLI, Tauri WebView, OpenCode 실행은 호출하지 않았고 기존 실제 연결 성공 기록을 이번 결과로 재집계하지 않아.
+- 다음 작업: 로드맵 1단계(기존 기능 안정화) 잔여 항목 중 "종료·큐·원본 동시 사용 실패 재현" 정리부터 착수.
+
 ## 테스트 전용 Mock Agent 재검증 (2026-10-25)
 
 - 현재 `mvp-app/src-tauri/src/mock_agent.rs`는 `main.rs`의 `#[cfg(test)]`에서만 컴파일돼. 운영 `registered()`에는 Codex, Antigravity, OpenCode 세 어댑터가 있고 Mock은 포함되지 않아. 격리 테스트 DB의 Mock 등록 행도 활성 역할이 없는 것으로 확인했어.

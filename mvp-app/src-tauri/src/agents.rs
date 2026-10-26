@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 pub type AgentFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + Send + 'a>>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ConnectionKind { AppServerStdioJsonRpc, AgyCliStreamJson, OpenCodeCliJson, #[cfg(test)] MockInProcess }
+pub enum ConnectionKind { AppServerStdioJsonRpc, AgyCliStreamJson, OpenCodeCliJson, ClaudeCodeCli, #[cfg(test)] MockInProcess }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AgentRole { Lead, Reviewer }
@@ -99,7 +99,11 @@ fn probe_install(id: &str) -> (Installation, Option<String>) {
         };
         return inspect_file(&PathBuf::from(appdata).join("npm/node_modules/opencode-ai/bin/opencode.exe"));
     }
-    let variable = if id == "codex" { "ESH_CODEX_BIN" } else { "ESH_AGY_BIN" };
+    let variable = match id {
+        "codex" => "ESH_CODEX_BIN",
+        "claude_code" => "ESH_CLAUDE_BIN",
+        _ => "ESH_AGY_BIN",
+    };
     if let Some(path) = std::env::var_os(variable) {
         return inspect_file(&PathBuf::from(path));
     }
@@ -107,8 +111,11 @@ fn probe_install(id: &str) -> (Installation, Option<String>) {
         return (Installation::Unknown, Some("USERPROFILE을 확인할 수 없습니다".into()));
     };
     let home = PathBuf::from(home);
-    if id == "codex" { inspect_codex_bin(&home.join("AppData/Local/OpenAI/Codex/bin")) }
-    else { inspect_file(&home.join(".gemini/bin/agy.exe")) }
+    match id {
+        "codex" => inspect_codex_bin(&home.join("AppData/Local/OpenAI/Codex/bin")),
+        "claude_code" => inspect_file(&home.join(".local/bin/claude.exe")),
+        _ => inspect_file(&home.join(".gemini/bin/agy.exe")),
+    }
 }
 
 fn probe_adapter(descriptor: AgentDescriptor) -> AgentProbe {
@@ -125,6 +132,7 @@ fn probe_adapter(descriptor: AgentDescriptor) -> AgentProbe {
             ConnectionKind::AppServerStdioJsonRpc => "App Server · stdio JSON-RPC",
             ConnectionKind::AgyCliStreamJson => "agy CLI · stream-json",
             ConnectionKind::OpenCodeCliJson => "OpenCode CLI · JSON",
+            ConnectionKind::ClaudeCodeCli => "Claude Code CLI · stream-json",
             #[cfg(test)] ConnectionKind::MockInProcess => "Mock · in-process",
         },
         installation,
@@ -162,15 +170,41 @@ pub trait ReviewAdapter: AgentAdapter {
 pub struct CodexAdapter;
 pub struct AntigravityAdapter;
 pub struct OpenCodeAdapter;
+pub struct ClaudeCodeAdapter;
 pub const CODEX: CodexAdapter = CodexAdapter;
 pub const ANTIGRAVITY: AntigravityAdapter = AntigravityAdapter;
 pub const OPENCODE: OpenCodeAdapter = OpenCodeAdapter;
+pub const CLAUDE: ClaudeCodeAdapter = ClaudeCodeAdapter;
 
-pub fn registered() -> [&'static dyn AgentAdapter; 3] { [&CODEX, &ANTIGRAVITY, &OPENCODE] }
+pub fn registered() -> [&'static dyn AgentAdapter; 4] { [&CODEX, &ANTIGRAVITY, &OPENCODE, &CLAUDE] }
 
 impl AgentAdapter for OpenCodeAdapter {
     fn descriptor(&self) -> AgentDescriptor {
         AgentDescriptor { id: "opencode", display_name: "OpenCode", connection: ConnectionKind::OpenCodeCliJson,
+            roles: &[AgentRole::Lead],
+            capabilities: AgentCapabilities { lead_conversation: true, delegated_review: false,
+                persistent_session: true, streaming: false, cancellation: true, model_catalog: false,
+                context_compaction: false, tool_call_bridge: false },
+        }
+    }
+}
+
+/// Advertises the Claude Code CLI as a conversation-only Lead.
+///
+/// The descriptor is what `submit` consults for its target allowlist and what
+/// `registry::active_role` consults to promote a registration to `supported`.
+/// Advertising it is therefore the change that makes a Claude Code turn
+/// reachable, which is why it lands together with the connection mapping in
+/// `registry` and the `active_role` check in `Engine::claude_runner`.
+///
+/// Capabilities describe the contract, not the verification state: the
+/// invocation flags are checked against the installed `--help`, but the
+/// stream-json event shape is still written from public docs and has not been
+/// confirmed against a real `claude -p` stream, and `streaming` stays false
+/// because the runner collects a whole turn instead of forwarding deltas.
+impl AgentAdapter for ClaudeCodeAdapter {
+    fn descriptor(&self) -> AgentDescriptor {
+        AgentDescriptor { id: "claude_code", display_name: "Claude Code", connection: ConnectionKind::ClaudeCodeCli,
             roles: &[AgentRole::Lead],
             capabilities: AgentCapabilities { lead_conversation: true, delegated_review: false,
                 persistent_session: true, streaming: false, cancellation: true, model_catalog: false,
@@ -320,6 +354,25 @@ mod tests {
         assert!(!arch.capabilities.persistent_session && !arch.capabilities.streaming);
         assert_eq!(agents[0].probe().authentication, Authentication::Unknown);
         assert_eq!(agents[1].probe().authentication, Authentication::Unknown);
+    }
+
+    #[test]
+    fn claude_code_is_advertised_as_a_conversation_only_lead() {
+        let agents = registered();
+        let claude = agents[3].descriptor();
+        assert_eq!((claude.id, claude.display_name), ("claude_code", "Claude Code"));
+        assert_eq!(claude.connection, ConnectionKind::ClaudeCodeCli);
+        assert_eq!(claude.roles, [AgentRole::Lead]);
+        assert!(claude.capabilities.lead_conversation && claude.capabilities.persistent_session);
+        assert!(claude.capabilities.cancellation);
+        // The runner collects a whole turn and the parser rejects a tool call, so
+        // neither streaming nor a tool-call bridge may be advertised.
+        assert!(!claude.capabilities.streaming && !claude.capabilities.tool_call_bridge);
+        assert!(!claude.capabilities.model_catalog && !claude.capabilities.context_compaction);
+        assert!(!claude.capabilities.delegated_review);
+        // The label differs from the other three, so the Agents screen cannot
+        // describe a Claude registration with another CLI's connection.
+        assert_eq!(CLAUDE.probe().connection, "Claude Code CLI · stream-json");
     }
 
     struct MockReviewer;

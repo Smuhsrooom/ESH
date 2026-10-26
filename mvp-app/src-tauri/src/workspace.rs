@@ -180,13 +180,70 @@ impl Store {
         if instance.provider != "opencode" || instance.active_role != Some("lead") || instance.installation != "installed" {
             return Err("실행 가능한 OpenCode Lead 등록이 아닙니다".into());
         }
-        let mut created = self.add_session(room_id, value, None, "new", &[])?;
-        let db = self.db.lock().map_err(err)?;
-        db.execute("UPDATE chat_sessions SET provider='opencode',agent_instance_id=?1 WHERE id=?2", params![instance_id,created.id]).map_err(err)?;
-        db.execute("UPDATE meta SET revision=revision+1", []).map_err(err)?;
-        created.provider = "opencode".into();
-        created.agent_instance_id = Some(instance_id.into());
-        Ok(created)
+        self.create_lead_session(room_id, value, instance_id, "opencode")
+    }
+    /// Claude Code Lead sessions. The registration check keys on the connection
+    /// kind instead of `active_role` because `active_role` stays `None` until an
+    /// adapter claims that connection, and the adapter is registered after this
+    /// session path. Gating on the connection kind means a plain registration
+    /// (which carries `not_configured` today) cannot own a session, and the path
+    /// opens by itself when the adapter starts assigning `claude_code_cli`.
+    pub fn create_claude_session(&self, room_id: &str, value: &str, instance_id: &str) -> Result<Session> {
+        let instance = self.list_agent_instances()?.into_iter().find(|i| i.id == instance_id)
+            .ok_or("Claude Code 등록을 찾을 수 없습니다")?;
+        if instance.provider != "claude_code" || instance.role != "lead" || instance.installation != "installed" {
+            return Err("실행 가능한 Claude Code Lead 등록이 아닙니다".into());
+        }
+        if instance.connection != crate::claude::CONNECTION_KIND {
+            return Err("Claude Code 실행 연결이 설정되지 않은 등록입니다".into());
+        }
+        self.create_lead_session(room_id, value, instance_id, "claude_code")
+    }
+    /// Picks the session kind from the registration instead of assuming every
+    /// `agent_instance_id` is an OpenCode Lead. `antigravity` is a reviewer and
+    /// `codex` is the builtin Lead, so neither can own a chat session.
+    pub fn create_agent_session(&self, room_id: &str, value: &str, instance_id: &str) -> Result<Session> {
+        let instance = self.list_agent_instances()?.into_iter().find(|i| i.id == instance_id)
+            .ok_or("에이전트 등록을 찾을 수 없습니다")?;
+        match instance.provider.as_str() {
+            "opencode" => self.create_opencode_session(room_id, value, instance_id),
+            "claude_code" => self.create_claude_session(room_id, value, instance_id),
+            _ => Err("이 에이전트로는 대화 세션을 만들 수 없습니다".into()),
+        }
+    }
+    /// The write both CLI Leads share. The row is inserted with its provider and
+    /// owning registration already in place, in the same transaction as the
+    /// revision bump. The previous version inserted through `add_session` (which
+    /// commits on its own) and then patched the provider, so a snapshot emitted
+    /// between the two commits showed a Lead-owned session as a `codex` one, and
+    /// a failed patch left that `codex` row behind as a phantom session.
+    fn create_lead_session(&self, room_id: &str, value: &str, instance_id: &str, provider: &str) -> Result<Session> {
+        let value = name(value)?;
+        let id = uuid::Uuid::new_v4().to_string();
+        let at = timestamp();
+        let mut db = self.db.lock().map_err(err)?;
+        let tx = db.transaction().map_err(err)?;
+        tx.execute(
+            "INSERT INTO chat_sessions(id,room_id,name,provider,agent_instance_id,mode,created_at) VALUES(?1,?2,?3,?4,?5,'new',?6)",
+            params![id, room_id, value, provider, instance_id, at],
+        )
+        .map_err(|e| format!("세션 추가 실패 (대상 룸이나 중복 추가를 확인해 주세요): {e}"))?;
+        tx.execute("UPDATE meta SET revision=revision+1", []).map_err(err)?;
+        tx.commit().map_err(err)?;
+        Ok(Session {
+            id,
+            session_id: String::new(),
+            created_at: at,
+            room_id: room_id.into(),
+            name: value,
+            thread_id: None,
+            source_thread_id: None,
+            mode: "new".into(),
+            model: None,
+            reasoning_effort: None,
+            provider: provider.into(),
+            agent_instance_id: Some(instance_id.into()),
+        })
     }
     pub fn session(&self, id: &str) -> Result<Session> {
         sessions(&*self.db.lock().map_err(err)?)?
@@ -203,16 +260,30 @@ impl Store {
             })
             .map_err(err)
     }
+    /// Points a local session at the external session it is talking to. The
+    /// updated-row count is checked because the previous version bumped
+    /// `meta.revision` and returned `Ok(())` even when the session row did not
+    /// exist, so a caller could not tell a real bind from a no-op. `thread_id` is
+    /// part of the snapshot, so the revision bump belongs in the same transaction
+    /// as the update: either the WebView sees the new thread or nothing changed.
     pub fn bind_codex_session(&self, id: &str, thread: &str, session: &str) -> Result<()> {
-        let db = self.db.lock().map_err(err)?;
-        db.execute(
-            "UPDATE chat_sessions SET thread_id=?1,codex_session_id=?2 WHERE id=?3",
-            params![thread, session, id],
-        )
-        .map_err(err)?;
-        db.execute("UPDATE meta SET revision=revision+1", [])
+        if id.trim().is_empty() || thread.trim().is_empty() || session.trim().is_empty() {
+            return Err("세션 연결 정보가 비어 있습니다".into());
+        }
+        let mut db = self.db.lock().map_err(err)?;
+        let tx = db.transaction().map_err(err)?;
+        let changed = tx
+            .execute(
+                "UPDATE chat_sessions SET thread_id=?1,codex_session_id=?2 WHERE id=?3",
+                params![thread, session, id],
+            )
             .map_err(err)?;
-        Ok(())
+        if changed != 1 {
+            return Err("세션을 찾을 수 없습니다".into());
+        }
+        tx.execute("UPDATE meta SET revision=revision+1", [])
+            .map_err(err)?;
+        tx.commit().map_err(err)
     }
     pub fn add_session(
         &self,
@@ -366,5 +437,125 @@ mod tests {
             restored.session(&resume.id).unwrap().thread_id.as_deref(),
             Some("original-thread")
         );
+    }
+
+    #[test]
+    fn a_claude_session_needs_a_registration_the_adapter_claims() {
+        let d = tempfile::tempdir().unwrap();
+        let s = Store::open(&d.path().join("claude.db")).unwrap();
+        let exe = d.path().join("claude.exe");
+        std::fs::write(&exe, b"do not execute").unwrap();
+        let lead = s.register_agent_instance("claude_code", &exe.to_string_lossy(), "lead").unwrap();
+        // A registration that no adapter claims has no execution connection, so
+        // it must not be able to own a session (and `support` stays honest).
+        assert_eq!(lead.connection, "not_configured");
+        assert_eq!((lead.support, lead.active_role), ("unsupported", None));
+        let connection_error = s.create_claude_session("default", "claude", &lead.id).err().expect("no connection");
+        assert!(connection_error.contains("실행 연결이 설정되지 않은"), "{connection_error}");
+        let dispatch_error = s.create_agent_session("default", "claude", &lead.id).err().expect("no connection");
+        assert!(dispatch_error.contains("실행 연결이 설정되지 않은"), "{dispatch_error}");
+
+        // The adapter (a later change) is what assigns the connection kind.
+        s.db.lock().unwrap()
+            .execute("UPDATE agent_instances SET connection_kind=?1 WHERE id=?2", params![crate::claude::CONNECTION_KIND, lead.id])
+            .unwrap();
+        let created = s.create_claude_session("default", "Claude test", &lead.id).unwrap();
+        assert_eq!((created.provider.as_str(), created.agent_instance_id.as_deref()), ("claude_code", Some(lead.id.as_str())));
+        // The session row, not just the returned value, carries the provider.
+        let saved = s.session(&created.id).unwrap();
+        assert_eq!((saved.provider.as_str(), saved.agent_instance_id.as_deref()), ("claude_code", Some(lead.id.as_str())));
+        // Creating the session does not promote the registration: `support` only
+        // moves once the adapter exists, which is the point of this ordering.
+        let listed = s.list_agent_instances().unwrap().into_iter().find(|i| i.id == lead.id).unwrap();
+        assert_eq!((listed.support, listed.active_role), ("unsupported", None));
+        // A session pins its registration, so removal stays refused.
+        assert!(s.unregister_agent_instance(&lead.id).is_err());
+
+        // The command path dispatches on the provider of the registration.
+        let via_agent = s.create_agent_session("default", "via agent", &lead.id).unwrap();
+        assert_eq!(via_agent.provider, "claude_code");
+        let other = d.path().join("review/claude.exe");
+        std::fs::create_dir_all(other.parent().unwrap()).unwrap();
+        std::fs::write(&other, b"do not execute").unwrap();
+        let reviewer = s.register_agent_instance("claude_code", &other.to_string_lossy(), "reviewer").unwrap();
+        s.db.lock().unwrap()
+            .execute("UPDATE agent_instances SET connection_kind=?1 WHERE id=?2", params![crate::claude::CONNECTION_KIND, reviewer.id])
+            .unwrap();
+        let role_error = s.create_claude_session("default", "reviewer", &reviewer.id).err().expect("reviewer");
+        assert!(role_error.contains("실행 가능한 Claude Code Lead"), "{role_error}");
+        // A registration whose file disappeared is not runnable either.
+        std::fs::remove_file(&exe).unwrap();
+        let missing_error = s.create_claude_session("default", "gone", &lead.id).err().expect("missing file");
+        assert!(missing_error.contains("실행 가능한 Claude Code Lead"), "{missing_error}");
+        // Codex and Antigravity cannot own a chat session.
+        assert!(s.create_agent_session("default", "codex", "codex").is_err());
+        assert!(s.create_agent_session("default", "arch", "antigravity").is_err());
+        assert!(s.create_agent_session("default", "missing", "no-such-instance").is_err());
+
+        drop(s);
+        let restored = Store::open(&d.path().join("claude.db")).unwrap();
+        assert_eq!(restored.session(&created.id).unwrap().provider, "claude_code");
+    }
+
+    #[test]
+    fn a_lead_session_is_one_published_change_with_no_placeholder_row() {
+        let d = tempfile::tempdir().unwrap();
+        let s = Store::open(&d.path().join("lead.db")).unwrap();
+        let cli = d.path().join("node_modules/opencode-ai/bin/opencode.exe");
+        std::fs::create_dir_all(cli.parent().unwrap()).unwrap();
+        std::fs::write(&cli, b"probe only").unwrap();
+        let lead = s.register_agent_instance("opencode", &cli.to_string_lossy(), "lead").unwrap();
+        let before = s.snapshot().unwrap().revision;
+        let created = s.create_opencode_session("default", "Lead one", &lead.id).unwrap();
+        // One created session is one publishable change. The previous version
+        // inserted the row through `add_session` and patched the provider after,
+        // so it bumped the revision twice for the same session.
+        assert_eq!(s.snapshot().unwrap().revision - before, 1);
+        // The row never exists in a `codex` shape: the provider and the owning
+        // registration come from the insert itself.
+        let saved = s.session(&created.id).unwrap();
+        assert_eq!((saved.provider.as_str(), saved.agent_instance_id.as_deref()), ("opencode", Some(lead.id.as_str())));
+        assert_eq!((saved.name.as_str(), saved.mode.as_str(), saved.thread_id.as_deref()), ("Lead one", "new", None));
+
+        // A rejected room leaves neither a session row nor a revision bump.
+        let after = s.snapshot().unwrap().revision;
+        let sessions_before = s.snapshot().unwrap().sessions.len();
+        let error = s.create_opencode_session("no-such-room", "orphan", &lead.id).err().expect("missing room");
+        assert!(error.contains("세션 추가 실패"), "{error}");
+        assert_eq!(s.snapshot().unwrap().revision, after);
+        assert_eq!(s.snapshot().unwrap().sessions.len(), sessions_before);
+    }
+
+    #[test]
+    fn binding_an_external_session_reports_misses_instead_of_storing_nothing() {
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("bind.db");
+        let s = Store::open(&path).unwrap();
+        let session = s.create_session("default", "A").unwrap();
+        let before = s.snapshot().unwrap().revision;
+        s.bind_codex_session(&session.id, "thread-a", "rpc-a").unwrap();
+        let bound = s.session(&session.id).unwrap();
+        assert_eq!(bound.thread_id.as_deref(), Some("thread-a"));
+        assert_eq!(bound.session_id, "rpc-a");
+        // `thread_id` is part of the snapshot, so the bind has to be visible to
+        // snapshot consumers without waiting for an unrelated change.
+        assert!(s.snapshot().unwrap().revision > before);
+
+        // A missing row must fail loudly and leave the previous binding alone.
+        let after = s.snapshot().unwrap().revision;
+        assert!(s.bind_codex_session("missing-session", "thread-b", "rpc-b").is_err());
+        assert_eq!(s.snapshot().unwrap().revision, after);
+        assert_eq!(s.session(&session.id).unwrap().thread_id.as_deref(), Some("thread-a"));
+        // An empty thread or external id is not a binding; reject it instead of
+        // storing an empty string that reads like "not bound yet".
+        assert!(s.bind_codex_session(&session.id, "", "rpc-c").is_err());
+        assert!(s.bind_codex_session(&session.id, "thread-c", "  ").is_err());
+        assert_eq!(s.snapshot().unwrap().revision, after);
+        assert_eq!(s.session(&session.id).unwrap().thread_id.as_deref(), Some("thread-a"));
+
+        drop(s);
+        let restored = Store::open(&path).unwrap();
+        assert_eq!(restored.session(&session.id).unwrap().thread_id.as_deref(), Some("thread-a"));
+        assert_eq!(restored.session(&session.id).unwrap().session_id, "rpc-a");
     }
 }
