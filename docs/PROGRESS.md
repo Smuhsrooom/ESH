@@ -1,5 +1,18 @@
 # ESH 진행 상태와 개발 인계
 
+## OpenCode deny 설정 복원 (2026-10-27)
+
+- 10-26에 제거한 `OPENCODE_CONFIG_CONTENT`의 `{"permission":{"*":"deny"}}`를 `opencode.rs`에 다시 넣었어. 이 설정이 없으면 OpenCode의 파일 수정·명령 실행을 프롬프트 문장으로만 막게 돼 `AGENTS.md`의 "파일 수정·셸 실행을 묵시적으로 활성화하지 마" 규칙과 맞지 않아.
+- 10-26의 원인 분석("deny가 API 연결을 차단")은 근거가 부족해. 10-25 기록에서는 같은 deny 설정으로 격리 WebView에서 실제 `OK` 답변 두 번과 선택 모델 답변을 받았어. `Cannot connect to API`의 실제 원인은 아직 확인되지 않았어.
+- 10-26의 나머지 변경은 유지해: `Cannot connect to API` stderr 패턴 감지 시 안내 문구 표시(stderr 원문은 노출하지 않음), `agents.rs`의 `#[allow(dead_code)]`.
+- `npm test` **50개 통과, 0개 실패**. 데스크톱 빌드와 실제 OpenCode 턴은 이번에 실행하지 않았어.
+
+## OpenCode API 연결 수정 및 Warning 제거 (2026-10-26, deny 제거는 10-27에 되돌림)
+
+- `opencode.rs`에서 `OPENCODE_CONFIG_CONTENT` 환경 변수의 전역 deny 설정을 제거했어. 이 설정이 OpenCode의 API 연결까지 차단해서 `Cannot connect to API` 오류가 발생했다고 판단했어. **이 제거는 2026-10-27에 되돌렸어(위 항목 참고).**
+- `agents.rs`의 `Authentication`과 `Availability` enum에 `#[allow(dead_code)]` 추가해 컴파일 warning 2개를 제거했어. 이 variant들은 미래 확장용이라 현재 코드에서는 사용하지 않지만 설계상 유지하는 게 맞아.
+- `npm test` **50개 통과, 0개 실패**. `npm run build`와 `npm run build:desktop` 모두 통과. 같은 `esh-chat-mvp4.exe` 대상을 유지했어. 실제 OpenCode API 연결 성공 여부는 WebView 실행 검증이 필요해.
+
 ## 테스트 전용 Mock Agent 재검증 (2026-10-25)
 
 - 현재 `mvp-app/src-tauri/src/mock_agent.rs`는 `main.rs`의 `#[cfg(test)]`에서만 컴파일돼. 운영 `registered()`에는 Codex, Antigravity, OpenCode 세 어댑터가 있고 Mock은 포함되지 않아. 격리 테스트 DB의 Mock 등록 행도 활성 역할이 없는 것으로 확인했어.

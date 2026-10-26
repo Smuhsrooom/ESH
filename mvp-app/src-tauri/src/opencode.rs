@@ -100,8 +100,12 @@ pub async fn run(path: &Path, work_dir: &Path, existing: Option<&str>, model: Op
     let errors = err_out.await.map_err(err)??;
     if output.len() > 4_194_304 || errors.len() > 65_536 { return Err("OpenCode 출력 크기 제한을 초과했습니다".into()); }
     if !status.success() {
-        // stderr can contain internal context; keep it out of the GUI and audit.
-        return Err(format!("OpenCode가 종료 코드 {:?}로 실패했습니다. CLI 로그를 확인해 주세요", status.code()));
+        let code = status.code().map(|c| c.to_string()).unwrap_or_else(|| "알 수 없음".to_string());
+        // stderr can contain auth tokens or internal paths; audit-unsafe.
+        if !errors.is_empty() && String::from_utf8_lossy(&errors).contains("Cannot connect to API") {
+            return Err("OpenCode API 연결 실패. CLI가 로그인되어 있고 인터넷 연결이 되는지 확인해 주세요".into());
+        }
+        return Err(format!("OpenCode가 종료 코드 {code}로 실패했습니다. CLI 로그를 확인해 주세요"));
     }
     parse_events(&output, existing)
 }

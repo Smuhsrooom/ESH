@@ -42,10 +42,12 @@ pub enum Installation { Installed, Missing, Unknown, Error }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
+#[allow(dead_code)]
 pub enum Authentication { Authenticated, Required, Unknown, Error }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
+#[allow(dead_code)]
 pub enum Availability { Ready, Unavailable, Unknown, Error }
 
 #[derive(Clone, Debug, Serialize)]
