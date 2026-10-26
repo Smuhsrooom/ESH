@@ -5,7 +5,7 @@
 - 10-26에 제거한 `OPENCODE_CONFIG_CONTENT`의 `{"permission":{"*":"deny"}}`를 `opencode.rs`에 다시 넣었어. 이 설정이 없으면 OpenCode의 파일 수정·명령 실행을 프롬프트 문장으로만 막게 돼 `AGENTS.md`의 "파일 수정·셸 실행을 묵시적으로 활성화하지 마" 규칙과 맞지 않아.
 - 10-26의 원인 분석("deny가 API 연결을 차단")은 근거가 부족해. 10-25 기록에서는 같은 deny 설정으로 격리 WebView에서 실제 `OK` 답변 두 번과 선택 모델 답변을 받았어. `Cannot connect to API`의 실제 원인은 아직 확인되지 않았어.
 - 10-26의 나머지 변경은 유지해: `Cannot connect to API` stderr 패턴 감지 시 안내 문구 표시(stderr 원문은 노출하지 않음), `agents.rs`의 `#[allow(dead_code)]`.
-- `npm test` **50개 통과, 0개 실패**. 데스크톱 빌드와 실제 OpenCode 턴은 이번에 실행하지 않았어.
+- `npm test` **50개 통과, 0개 실패**. 커밋 `09e61c5` 이후 `npm run build:desktop` 통과(같은 `esh-chat-mvp4.exe`, 2026-10-27 00:10). 빌드된 exe 안에 `OPENCODE_CONFIG_CONTENT`와 deny JSON 문자열이 들어 있는 것을 확인했어. 실제 OpenCode 턴과 WebView 화면은 이번에 실행하지 않았어.
 
 ## OpenCode API 연결 수정 및 Warning 제거 (2026-10-26, deny 제거는 10-27에 되돌림)
 
