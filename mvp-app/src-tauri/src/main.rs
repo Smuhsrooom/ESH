@@ -127,8 +127,10 @@ fn create_session(
     engine: tauri::State<'_, Arc<Engine>>,
 ) -> Result<store::Session> {
     engine.ensure_accepting()?;
+    // The registration decides the session kind: the front end only passes the
+    // selected agent id, and every CLI Lead owns a different provider.
     let session = if let Some(id) = agent_instance_id {
-        engine.store.create_opencode_session(&room_id, &name, &id)?
+        engine.store.create_agent_session(&room_id, &name, &id)?
     } else { engine.store.create_session(&room_id, &name)? };
     engine.emit()?;
     Ok(session)

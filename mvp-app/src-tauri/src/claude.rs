@@ -3,11 +3,13 @@
 //! This module defines the invocation contract, the stream-json result
 //! classification and the one-process-per-turn runner for a future
 //! `claude_code_cli` Lead adapter. `Engine::claude_turn` calls `run` for a
-//! session whose provider is `claude_code`, but nothing can reach that branch
-//! yet: no command creates such a session, and `submit` refuses the
-//! `claude_code` target because no adapter advertises it. The adapter
-//! registration and the session path are a later change, so `CONNECTION_KIND`
-//! stays unused until then.
+//! session whose provider is `claude_code`, and `Store::create_claude_session`
+//! can now create one, but only for a registration that already carries
+//! `CONNECTION_KIND`. Nothing assigns that kind yet: registration writes
+//! `not_configured` and no adapter advertises `claude_code`, so `submit` still
+//! refuses the `claude_code` target and no turn can reach the CLI. The adapter
+//! registration is the remaining change, and it is the step that would make a
+//! real `claude -p` run reachable, so it needs the pending approval first.
 //!
 //! Evidence boundary:
 //! - The flags and values in `command_args` are checked against the help text
