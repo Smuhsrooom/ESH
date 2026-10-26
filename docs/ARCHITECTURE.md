@@ -1,6 +1,6 @@
 # ESH 현재 아키텍처
 
-확인일: 2026-10-18. 기준은 현재 `mvp-app/` 소스와 `evidence/`의 저장된 결과야. 이 문서는 구현 설명이며, 미구현·검증 공백은 [PROGRESS.md](PROGRESS.md)에 따로 적었어.
+최초 작성: 2026-10-18, 최종 갱신: 2026-10-27(schema v6·어댑터 4개 반영). 기준은 현재 `mvp-app/` 소스와 `evidence/`의 저장된 결과야. 이 문서는 구현 설명이며, 미구현·검증 공백은 [PROGRESS.md](PROGRESS.md)에 따로 적었어.
 
 ## 디렉터리와 경계
 
@@ -96,7 +96,7 @@ sequenceDiagram
 
 ## CLI 연결과 설정
 
-`AgentAdapter`는 고정된 `codex`/`antigravity` ID, 연결 방식, 역할, 지원 capability를 분리해 제공해. `LeadAdapter`의 Codex 구현은 기존 `Rpc`를 `CodexLeadSession`으로 감싸고, `ReviewAdapter`의 Antigravity 구현은 기존 `cli::arch`를 호출해. Engine의 단일 worker가 턴 이벤트와 열린 `request_arch_review` 호출을 계속 소유하므로 위임 중 다른 AI 턴은 시작하지 않아. `probe_agents`는 각 어댑터의 설치 경로만 읽어 확인하고 CLI 프로세스·모델 턴·기존 세션을 시작하지 않아. 설치됐더라도 인증과 실행 가능 여부는 확인할 수 없어 `Unknown`으로 둬. Agents 화면은 연결 방식·점검 시각·실패 사유와 별도 실행 상태를 보여주고 새로고침할 수 있어. `registry.rs`는 PATH와 알려진 사용자별 기본 위치에서 Claude Code/Gemini CLI/OpenCode의 파일을 확인해. 파일이 없으면 Claude `~/.local/bin/claude.exe`, Gemini `%APPDATA%/npm/gemini.cmd`, OpenCode `%APPDATA%/npm/node_modules/opencode-ai/bin/opencode.exe`를 입력칸에 제안하고 상태는 `미설치`로 둬. Gemini의 알려진 npm `.cmd`는 등록만 허용하며 실행하지 않아. 수동 입력은 provider별 파일명·절대 경로·실제 파일 여부를 검사해. npm `opencode-ai/bin/opencode.exe`를 Lead로 등록하면 `opencode_cli_json`, `~/.local/bin/claude.exe`를 Lead로 등록하면 `claude_code_cli` 실행 연결을 제공하고, 그 밖의 신규 인스턴스는 `not_configured`/`unsupported`로 보존해.
+`AgentAdapter`는 등록된 어댑터 4개(`codex`, `antigravity`, `opencode`, `claude_code`)마다 고정 ID, 연결 방식, 역할, 지원 capability를 분리해 제공해. `LeadAdapter`의 Codex 구현은 기존 `Rpc`를 `CodexLeadSession`으로 감싸고, `ReviewAdapter`의 Antigravity 구현은 기존 `cli::arch`를 호출해. Engine의 단일 worker가 턴 이벤트와 열린 `request_arch_review` 호출을 계속 소유하므로 위임 중 다른 AI 턴은 시작하지 않아. `probe_agents`는 각 어댑터의 설치 경로만 읽어 확인하고 CLI 프로세스·모델 턴·기존 세션을 시작하지 않아. 설치됐더라도 인증과 실행 가능 여부는 확인할 수 없어 `Unknown`으로 둬. Agents 화면은 연결 방식·점검 시각·실패 사유와 별도 실행 상태를 보여주고 새로고침할 수 있어. `registry.rs`는 PATH와 알려진 사용자별 기본 위치에서 Claude Code/Gemini CLI/OpenCode의 파일을 확인해. 파일이 없으면 Claude `~/.local/bin/claude.exe`, Gemini `%APPDATA%/npm/gemini.cmd`, OpenCode `%APPDATA%/npm/node_modules/opencode-ai/bin/opencode.exe`를 입력칸에 제안하고 상태는 `미설치`로 둬. Gemini의 알려진 npm `.cmd`는 등록만 허용하며 실행하지 않아. 수동 입력은 provider별 파일명·절대 경로·실제 파일 여부를 검사해. npm `opencode-ai/bin/opencode.exe`를 Lead로 등록하면 `opencode_cli_json`, `~/.local/bin/claude.exe`를 Lead로 등록하면 `claude_code_cli` 실행 연결을 제공하고, 그 밖의 신규 인스턴스는 `not_configured`/`unsupported`로 보존해.
 
 Codex는 `ESH_CODEX_BIN` override 또는 로컬 Codex bin 디렉터리에서 수정 시간이 최신인 exe를 찾아 `--no-daemon app-server --listen stdio://`로 시작해. 설정 override는 MCP 빈 목록, apps 비활성화야. 추론 강도는 turn/start에서 지정해. handshake는 experimental API를 사용해. RPC 요청 대기는 60초, Codex 다음 이벤트 대기는 180초야.
 
@@ -129,9 +129,10 @@ Arch는 `ESH_AGY_BIN` 또는 사용자 `.gemini/bin/agy.exe`를 찾아 리뷰마
 | 테이블 | 저장 내용 |
 |---|---|
 | `rooms` | 이름과 생성 시간. 프로젝트·룸 역할을 함께 담당 |
-| `chat_sessions` | 로컬 UUID, room_id, 이름, thread_id, codex_session_id, source_thread_id, mode, 세션 version, model, reasoning_effort |
+| `chat_sessions` | 로컬 UUID, room_id, 이름, thread_id, codex_session_id, source_thread_id, mode, 세션 version, model, reasoning_effort, provider(기본 `codex`), agent_instance_id |
 | `messages` | 전역 증가 sequence, UUID, 발화자, 내용, 생성 시각, delivery, version, error, channel/kind, 룸·로컬 세션·thread·turn·call 연결 |
-| `agents` | Codex/Antigravity 현재 상태와 상세·갱신 시각 |
+| `agents` | 내장 Codex/Antigravity와 등록 인스턴스별 현재 상태, 상세·갱신 시각 |
+| `agent_instances` | 등록한 에이전트의 provider, 고유 instance ID, 연결 방식, 희망 역할, 실행 파일 경로 |
 | `tool_deliveries` | 호출별 RPC id와 응답 전달 상태 |
 | `audit` | Codex/Arch 프로토콜·stderr·프로세스·종료 로그 |
 | `meta` | 앱 전역 메시지 버전과 화면 revision |
@@ -176,6 +177,8 @@ GUI 검증 로그의 메시지 content는 DB의 원문이며 renderedText는 실
 schema 3→4는 `session_context` 테이블을 추가하고 기존 세션·메시지는 그대로 보존해. snapshot.contexts에서 선택한 로컬 sessionId와 threadId가 모두 맞는 행만 표시해. 새 세션·가져온 사본은 이벤트 수신 전까지 사용량 대기/압축 관측 전이야. 다른 앱에서 과거 발생한 압축을 복원하거나 관측 전 상태를 압축 미실행으로 단정하지 않아.
 
 schema 4→5는 ESH 내부의 `agent_instances`를 추가해 provider, 고유 instance ID, 연결 방식, 역할, 실행 파일 경로를 별도 컬럼에 저장해. 기존 Codex·Antigravity를 builtin 행으로 보존하고 기존 `agents` 실행 상태, 메시지·세션·`tool_deliveries`는 그대로 둬. 사용자 인스턴스 등록 해제는 이 테이블의 행만 삭제해.
+
+schema 5→6(`workspace::migrate_agent_sessions`)은 `chat_sessions`에 `provider`(기본 `codex`)와 `agent_instance_id`를 추가해. 기존 세션은 모두 Codex 세션으로 남아. 경로가 npm `opencode-ai/bin/opencode.exe`인 사용자 OpenCode Lead 등록은 `opencode_cli_json` 연결로 바꾸고 상태 행을 만들어. 기존 메시지·세션·`tool_deliveries`는 그대로 둬.
 
 `Rpc.next`가 `thread/tokenUsage/updated`의 last/total/modelContextWindow를 저장하고 Engine 이벤트가 React snapshot을 갱신해. RPC 요청 중 보류된 이벤트는 실제 소비할 때 한 번 처리해. 사용률은 last.totalTokens / modelContextWindow의 추정치이며 total 누적값을 분자로 사용하지 않아. 분모가 미제공·0이면 비율을 표시하지 않아. 입력창·대기 입력과 계정 한도를 포함하는 지표가 아니야. 최근/누적/입출력/캐시 토큰과 보고 시각을 펼쳐볼 수 있어. 숫자는 서버 보고 그대로 보존하므로 압축 직후 totalTokens와 상세 카운터 합이 다를 수도 있어.
 

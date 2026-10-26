@@ -1,5 +1,15 @@
 # ESH 진행 상태와 개발 인계
 
+## worktree 동기화와 ARCHITECTURE.md의 schema v6 반영 (2026-10-27)
+
+- `bot/codex-impl`, `bot/anti-review`를 main(`fb4d842`)으로 fast-forward했어. 두 worktree 모두 커밋 안 된 변경과 `.automation.lock`이 없었어. 세 브랜치가 같은 커밋에서 출발해.
+- `docs/ARCHITECTURE.md`만 고쳤어(코드 무변경). 근거는 소스 줄과 대조했어.
+  - 99행 "고정된 `codex`/`antigravity` ID" → 어댑터 4개(`codex`, `antigravity`, `opencode`, `claude_code`). 근거 `agents.rs:179` `registered()`와 `:183`, `:207` descriptor.
+  - schema 5→6 문단 추가. 근거 `workspace.rs:81-103` `migrate_agent_sessions`(`provider` 기본 `codex`, `agent_instance_id`, npm OpenCode Lead 연결 변환, 상태 행 생성, `user_version=6`)와 `store.rs:117` 호출.
+  - SQLite 표: `chat_sessions`에 `provider`·`agent_instance_id` 추가, `agents` 설명을 등록 인스턴스 포함으로 정정, 빠져 있던 `agent_instances` 행 추가.
+  - 문서 상단 확인일을 "최초 작성 10-18, 최종 갱신 10-27"로 바꿨어.
+- 검증: 문서만 바꿔서 테스트·빌드는 다시 실행하지 않았어. 문서 정확성은 위 `파일:줄` 대조가 근거야.
+
 ## deny 설정의 OpenCode 실제 응답 확인과 `bot/codex-impl` 병합 (2026-10-27)
 
 - **OpenCode 실제 CLI 검사**: `opencode.rs::run`과 같은 인수(`run --pure --format json --agent plan --dir … --title`)와 같은 `OPENCODE_CONFIG_CONTENT={"permission":{"*":"deny"}}`로 npm OpenCode CLI 1.18.34를 GUI 밖에서 직접 실행했어. 선택 모델(`openrouter/cohere/north-mini-code:free`)과 기본 모델 두 경우 모두 종료 코드 0, `step_finish(reason=stop)`, 도구 호출 없음, 답변 `확인`/`예`, `Cannot connect to API` 없음. 보호 대상 OpenCode 설정·인증 파일 3,682개의 해시가 전후 같아. 근거: `mvp-app/evidence/opencode-deny-20261027/result.json`, 실행 스크립트 `run.ps1`. 첫 실행은 검사 스크립트가 stdout을 콘솔 코드페이지로 읽어 한글 답변이 깨진 기록이라 `first-run-garbled/`에 보존했어(OpenCode 자체는 성공).
