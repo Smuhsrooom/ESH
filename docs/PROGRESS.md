@@ -1,5 +1,34 @@
 # ESH 진행 상태와 개발 인계
 
+## 세션 종류를 등록에서 고르게 하고 Claude 세션 경로 추가 (2026-10-26, 3단계 다섯 번째 조각)
+
+- 선택한 작업: 3단계(추가 CLI 어댑터)의 다음 조각으로 지난 회차가 남긴 (b) "`workspace.rs`의 `create_claude_session` + `main.rs` `create_session`의 provider 분기". `create_session` 명령이 `agent_instance_id`를 **무조건** `create_opencode_session`으로 보내고 있어서, Claude Code 등록으로 세션을 만들면 OpenCode 문구로 실패했고 세션 종류가 한 provider에 고정돼 있었어.
+- **이번 실행의 특이 사항(먼저 밝힘)**: 시작 시점에 `.automation.lock`이 `2026-10-26 00:58:55`로 남아 있었고(약 17시간 28분 경과, 90분 초과) 작업 트리에 커밋되지 않은 변경 3파일이 있었어. 즉 00:58에 시작한 회차가 검증·커밋 전에 중단된 상태야. 그 변경이 바로 이번에 선택한 (b) 작업과 일치해(내용을 읽어 확인) **버리지 않고 이어받아** 검증·수정·커밋했어. 이전 회차가 이미 작성한 코드라는 점을 기록해 둬 — 이번 회차가 처음부터 작성한 것이 아니야.
+- 변경 파일: `mvp-app/src-tauri/src/workspace.rs`, `mvp-app/src-tauri/src/main.rs`, `mvp-app/src-tauri/src/claude.rs`(모듈 주석만).
+  - `create_agent_session(room_id, value, instance_id)` 추가 — 등록 행의 `provider`를 읽어 `opencode`는 `create_opencode_session`, `claude_code`는 `create_claude_session`으로 보내고 그 밖(`codex`·`antigravity`·`mock_agent`)은 `이 에이전트로는 대화 세션을 만들 수 없습니다`로 거절해. `create_session` 명령은 이 함수 하나만 호출해.
+  - `create_claude_session(room_id, value, instance_id)` 추가 — `provider == "claude_code"`, `role == "lead"`, `installation == "installed"`를 확인하고 **`connection == claude::CONNECTION_KIND`까지** 확인해. `active_role`이 아니라 `connection`을 보는 이유는 등록 조각이 아직 없어 `active_role`이 `None`이기 때문이야(지난 회차의 `claude_runner`가 `role`을 보는 것과 같은 이유). 지금 `register_agent_instance`는 `not_configured`만 쓰므로 **어떤 등록도 이 경로를 통과하지 못하고**, 어댑터가 `claude_code_cli`를 부여하는 순간 이 경로가 스스로 열려.
+  - `create_lead_session(room_id, value, instance_id, provider)` 추출 — 두 CLI Lead가 공유하는 쓰기야. `add_session` 뒤 `provider`·`agent_instance_id`를 **한 문장**으로 쓰고 같은 트랜잭션에서 `meta.revision`을 올리며, 갱신 행이 1이 아니면 오류로 롤백해. 이전 `create_opencode_session`은 검사 없는 `execute` 두 번이었어.
+  - `claude.rs`는 모듈 주석만 갱신 — "세션 경로가 생겼으나 등록이 없어 도달 불가"로 사실을 맞췄어. 계약·파서·`run` 시그니처·`CONNECTION_KIND` 값은 그대로야.
+- 동작 보존: OpenCode 세션 생성은 검사·최종 행 값이 같고(쓰기가 트랜잭션 + `changed != 1` 가드로 바뀐 것만 다름), `create_session`에서 `agent_instance_id` 없이 부르는 경로(Codex 기본 세션)는 그대로야. Claude 등록으로 세션을 만들려 하면 이전에는 `실행 가능한 OpenCode Lead 등록이 아닙니다`, 지금은 `Claude Code 실행 연결이 설정되지 않은 등록입니다`로 **둘 다 실패**하고 세션은 만들어지지 않아 — 살아 있는 동작 변화는 없어. `support`/`active_role`/Agents 화면 값도 그대로야(등록을 하지 않았으므로). Blocking Delegation, `request_arch_review`, `archReview`/`latestUserRequirements` 구조적 분리, `tool_deliveries`, 종료 순서, Arch 타임아웃 120초(범위 30~600), 단일 worker, DB 스키마·`user_version=6`, 실행 파일 이름 `esh-chat-mvp4` 모두 그대로고 새 Tauri 명령·새 DB 쓰기·프런트 변경은 없어.
+- 검증 (실제 출력):
+  - `cargo test --bin esh-chat-mvp4` (프로젝트 상위 `.tools`의 cargo를 `src-tauri/`에서 직접 실행) → `test result: ok. 84 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.84s` (기존 83 → 84, 순증 1). 신규 `workspace::tests::a_claude_session_needs_a_registration_the_adapter_claims` → `ok`. Rust 경고는 기존 2건(`agents.rs`의 `Authenticated`·`Required`·`Error`, `Ready` 미생성 variant)뿐이고 `workspace.rs`·`main.rs`·`claude.rs`에서 새 경고는 없어.
+  - `node scripts/verify_external_threads.mjs` → `{"passed":true,"recordedRows":27,"scratchRowsHidden":9,"normalConversationsPreserved":true}`
+  - `npm run build` → `✓ built in 5.09s` (`dist/assets/index-B_6vxOOa.js` 433.29 kB, `index-YBSTmYxd.css` 52.24 kB, `guiProbe-djswdxyz.js` 45.64 kB — 프런트를 건드리지 않아 해시 동일)
+  - 경고 재확인: `scripts/rust.ps1`은 이 환경에서 cargo의 stderr 진행 메시지에 끊겨 exit 1로 보이므로 `.tools\cargo\bin\cargo.exe`를 `CARGO_HOME`/`RUSTUP_HOME`/`PATH`를 `.tools`로 맞춰 직접 실행했어. **작업 디렉터리는 `mvp-app/`이 아니라 `mvp-app/src-tauri/`여야 해** — `mvp-app/`에서 돌리면 `could not find Cargo.toml`로 즉시 실패해(이번에 한 번 실패한 뒤 경로를 고쳤어).
+- 신규 테스트가 실제로 확인한 것: (1) `claude_code` Lead 등록을 만들어도 `connection == not_configured`이면 `create_claude_session`·`create_agent_session` **둘 다** `실행 연결이 설정되지 않은`으로 거절하고, `support`는 `unsupported`, `active_role`은 `None`으로 남는다는 것, (2) 어댑터가 부여할 `connection_kind`를 DB에 직접 넣은 뒤에는 세션이 `provider='claude_code'`로 만들어지고 **반환값과 실제 저장 행 모두** 등록 ID를 갖는다는 것, (3) 세션을 만든 것만으로 `support`/`active_role`이 올라가지 않는다는 것(등록 순서 규칙 유지), (4) 세션이 등록을 고정하므로 `unregister_agent_instance`가 계속 거절된다는 것, (5) `role == reviewer`인 Claude 등록, 실행 파일이 사라진 등록, `codex`/`antigravity`/없는 ID는 각각 거절된다는 것, (6) 재시작(`Store::open`) 후에도 `provider`가 `claude_code`로 남는다는 것.
+- 이 검증의 경계(중요):
+  - `create_session` **Tauri 명령 자체**는 `Engine`(`AppHandle`)을 들어 단위 테스트로 호출하지 못했어. 테스트는 그 명령이 호출하는 `create_agent_session`/`create_claude_session`/`create_lead_session`을 실제 SQLite로 검사한 것이고, 명령 배선은 컴파일과 코드 확인으로만 검증했어.
+  - **`claude_code` 세션은 여전히 실제로 만들 수 없어.** 등록이 `claude_code_cli`를 받는 경로가 없기 때문이야(어댑터 미등록). 이번 조각은 "등록이 그 값을 받는 순간 열릴 세션 경로"를 만든 것이고, "Claude Code 연결"이나 "Claude 턴 실행"이 아니야.
+  - 실제 `claude -p` 1회, `python scripts/verify_*.py`, WebView, 데스크톱 빌드는 실행하지 않았어(변경이 Rust 백엔드이고 실행 중인 앱을 건드리지 않으려고).
+- 남은 문제:
+  1. **승인 대기**: 실제 `claude -p` 1회로 stream-json 원문 캡처(외부 데이터 전송 + 계정 사용량). 이때까지 `parse_events`는 공개 문서 기준이야.
+  2. 등록 조각 미구현 — `ConnectionKind::ClaudeCodeCli`·`ClaudeCodeAdapter` descriptor·`registered()` 추가(`agents.rs`), `register_agent_instance`에서 `claude_code` Lead + 설치된 경로일 때 `connection_kind = claude_code_cli` 부여와 `active_role` 매핑(`registry.rs`). **이 조각이 들어가면 위 세션 경로가 실제로 열리므로** 그때 `claude_runner`의 검사를 `role` → `active_role == Some("lead")`로 좁히고 `support`를 실행 경로와 일치시켜야 해.
+  3. `create_lead_session`의 두 커밋 — `add_session`이 먼저 커밋되므로 그 사이에 읽는 소비자는 아직 `provider='codex'`인 세션을 볼 수 있어. provider·등록 ID와 revision은 한 문장으로 묶었지만 세션 행 생성까지 한 트랜잭션으로 합치지는 않았어(기존 OpenCode 경로도 같았음). 실제 관측된 문제는 없고, 필요하면 다음에 `add_session`을 같은 트랜잭션으로 흡수해야 해.
+  4. 도구 정책 미확정 — `--permission-mode plan`이 대화 전용 계약을 실제로 지키는지 미검증.
+  5. 1단계 잔여 4건(GUI 실행 확인, `tauri-plugin-single-instance` 내부 경합, 원본 세션 전역 잠금=승인 대기, 종료 중 거절의 WebView 재현)은 그대로 차단 상태야.
+- 다음 작업: (c) `agents.rs`+`registry.rs` 등록 조각 — `claude_code` Lead 등록에 `claude_code_cli` 연결을 부여하고 `ClaudeCodeAdapter`를 `registered()`에 넣은 뒤, 같은 조각에서 `claude_runner`를 `active_role` 기준으로 좁혀 `support` 표기가 실행 경로와 일치하게 맞출 것. 승인을 받으면 그 전에 실제 `claude -p` 캡처로 `parse_events`를 확정하는 편이 좋아.
+- 실행 메모(이 환경): `.tools\cargo\bin\cargo.exe`는 **`mvp-app/src-tauri/`에서** 실행할 것(`mvp-app/`에는 `Cargo.toml`이 없어 `could not find Cargo.toml`). `Out-File -Encoding utf8` 로그는 BOM 때문에 `grep`이 첫 줄을 못 잡을 수 있으니 `grep -a`로 확인할 것.
+
 ## 실행 분기를 허용 목록으로 전환하고 Claude 턴 분기 추가 (2026-10-26, 3단계 네 번째 조각)
 
 - 선택한 작업: 3단계(추가 CLI 어댑터)의 다음 조각으로, 17회차가 남긴 (a) "`worker`의 target 분기를 `turn_route`로 바꾸고 `claude_turn` 추가". 17회차가 세운 가드는 `submit`에만 있었고 `worker`는 여전히 `input.target` 문자열을 비교해 마지막 분기가 Codex 턴이었어. 즉 세션 provider와 target이 어긋난 입력이 큐에 남아 있으면(예: 큐에 넣은 뒤 provider가 바뀐 경우) Codex가 답하고 그 세션 에이전트가 답한 것처럼 저장될 수 있었어. 이번에 분기 기준을 판정 함수 결과로 바꿔 그 경로를 없앴어.
