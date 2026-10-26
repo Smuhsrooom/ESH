@@ -1,5 +1,36 @@
 # ESH 진행 상태와 개발 인계
 
+## ARCHITECTURE.md의 Claude 연결 서술 두 줄을 코드 사실로 정정 (2026-10-26, 1단계 문서 정합성)
+
+- 선택한 작업: 19~22회차가 "다음 작업"으로 네 번 미뤄 둔 `docs/ARCHITECTURE.md` 35행·99행 정정. 3단계 등록 조각(`9844058`)과 화면 배선 조각(`9d4b238`) 이후 두 문장이 사실과 달라져 있었어("Claude Code와 Gemini CLI는 등록 후보이며 실행 연결은 아직 미지원", "나머지 신규 인스턴스는 `not_configured`/`unsupported`"). 코드 변경 없이 **문서만** 고쳤어 — 요청 범위를 넘겨 리팩터링·기능 추가로 확대하지 않았어.
+- 변경 파일: `docs/ARCHITECTURE.md` 1개(2줄 치환, +2/-2). `git diff --stat` → `1 file changed, 2 insertions(+), 2 deletions(-)`.
+  - 35행: "Claude Code는 계약 위치(`~/.local/bin/claude.exe`)에 Lead로 등록하면 `claude_code_cli` 연결을 받아 세션 생성과 턴 전송 경로가 배선돼 있지만, 실제 `claude -p` 출력으로 이벤트 파서를 확인하지 않아 턴 실행 성공은 아직 검증되지 않았어(PROGRESS.md 참고). Gemini CLI는 등록 후보이며 실행 연결은 아직 미지원이야." — 등록·세션·턴 배선이 있다는 사실과 **실제 CLI 실행 미검증**을 한 문장 안에서 분리해 적었어. "지원됨"으로 읽히지 않게 파서 미확정을 같은 문장에 붙였어.
+  - 99행: "npm `opencode-ai/bin/opencode.exe`를 Lead로 등록하면 `opencode_cli_json`, `~/.local/bin/claude.exe`를 Lead로 등록하면 `claude_code_cli` 실행 연결을 제공하고, 그 밖의 신규 인스턴스는 `not_configured`/`unsupported`로 보존해." — 실제 판정 함수가 두 provider만 참이므로 "그 밖"으로 범위를 명시했어.
+- 정정 근거(코드에서 직접 확인한 줄, 문서 주장 ↔ 소스 대응):
+  - `src-tauri/src/agents.rs:13` `ConnectionKind::ClaudeCodeCli`, `:177` `registered()`가 4개(`&CODEX, &ANTIGRAVITY, &OPENCODE, &CLAUDE`), `:205` descriptor `id: "claude_code"` → "Claude Code가 등록 후보에만 머문다"는 서술은 거짓.
+  - `src-tauri/src/registry.rs:81-97` `recognized_install`이 `opencode`(npm shim)와 `claude_code`(`/.local/bin/claude.exe`)만 참, `connection_kind`는 `role == "lead"`이고 그 판정이 참일 때만 `opencode_cli_json`/`claude_code_cli`, 아니면 `not_configured` → 99행의 새 문장과 일치.
+  - `src-tauri/src/engine.rs:81` `"claude_code" => (target == "claude_code").then_some(TurnRoute::Claude)`, `:1088` `commit_lead_answer(..., "claude_code", ...)` → 턴 분기·마감 경로 존재.
+  - `src/providers.ts:36` `if (provider === 'claude_code') return 'claude_code'`, `:42` `isCliLeadProvider`에 `claude_code` 포함, `src/main.tsx:185` `turnTarget(provider)`, `:290` 세션 생성 드롭다운이 `isCliLeadProvider`로 필터 → 화면 배선 존재.
+  - `mvp-app/evidence/`에 claude 관련 산출물이 **없음**(`ls evidence/ | grep -i claude` → 결과 없음) → "실제 `claude -p` 출력으로 파서를 확인하지 않았다"는 서술의 근거.
+- 동작 보존: 코드·스키마·Tauri 명령·프런트를 한 줄도 바꾸지 않았어. Blocking Delegation, `request_arch_review`, `archReview`/`latestUserRequirements` 구조적 분리, `tool_deliveries`, 종료 순서, Arch 타임아웃 120초(범위 30~600), 단일 worker, DB 스키마·`user_version=6`, 실행 파일 이름 `esh-chat-mvp4` 모두 그대로야.
+- 검증 (실제 출력):
+  - `git diff --stat` → `docs/ARCHITECTURE.md | 4 ++--`, `1 file changed, 2 insertions(+), 2 deletions(-)`. 변경 파일이 문서 1개뿐임을 확인(코드 무변경).
+  - `cargo test --bin esh-chat-mvp4` (`.tools`의 cargo를 `mvp-app/src-tauri/`에서 직접 실행) → `test result: ok. 89 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.57s`. 직전 회차(89 passed, 1.68s)와 동일 — 코드를 바꾸지 않았으므로 기준선 유지 확인이야. 로그 `mvp-app/evidence/ct-r23.log`(gitignore 대상). 경고는 기존 2건(`agents.rs`의 `Authenticated`·`Required`·`Error`, `Ready` 미생성 variant)뿐.
+  - `node scripts/verify_external_threads.mjs` → `{"passed":true,"recordedRows":27,"scratchRowsHidden":9,"normalConversationsPreserved":true}`
+  - `npm run build` → `✓ 298 modules transformed`, `✓ built in 3.60s` (`dist/assets/index-CXzmrCQ4.js` 433.84 kB, `index-YBSTmYxd.css` 52.24 kB, `guiProbe-Ec5GCOO9.js` 45.64 kB). **세 해시 모두 직전 회차와 동일** — 문서만 바꿨으므로 맞아. Tailwind 후보 오염도 없어(CSS 52.24 kB 그대로).
+- 중간 실패 1건(정직하게 기록, 환경 문제): 첫 `npm run build`가 코드 오류가 아니라 **샌드박스 안전 삭제 shim 타임아웃**으로 죽었어 — `[safe-delete] 操作失败: spawnSync ...genie-trash\win32-x64.exe ETIMEDOUT` at `emptyDir`/`prepareOutDir`. vite가 기존 `dist/`를 비우려다 난 것이야. `dist`가 gitignore 대상 빌드 산출물임을 확인한 뒤 `rm -rf dist`로 직접 비우고 재실행해 위 성공 결과를 얻었어. **다음에도 `npm run build`가 `safe-delete` 오류로 죽으면 코드가 아니라 `dist/` 비우기 단계 문제로 보고 `dist`를 직접 지운 뒤 재실행할 것.**
+- 이 검증의 경계(중요):
+  - 이번 변경은 **문서 서술 정정**이라 실행 동작의 변화가 없고, 위 세 검사는 "문서만 바꿨으니 코드 기준선이 그대로다"를 확인한 것이야. **문서 정확성 자체를 자동 검증한 것은 아니야** — 근거는 위에 적은 `파일:줄` 대조야.
+  - 실제 `claude -p`, `python scripts/verify_*.py`, WebView, 데스크톱 빌드는 실행하지 않았어. 정정한 문장이 가리키는 "턴 실행 성공"은 여전히 **미검증**이고, 문서도 그렇게 적었어.
+- 남은 문제:
+  1. **승인 대기(변동 없음)**: 실제 `claude -p` 1회로 stream-json 원문 캡처(외부 데이터 전송 + 계정 사용량). 이때까지 `parse_events`는 공개 문서 기준이야.
+  2. **ARCHITECTURE.md에 아직 남은 불일치 2곳(이번엔 고치지 않음, 범위 유지)**: 23행 `agents.rs`를 "Codex Lead/Antigravity Reviewer 어댑터"로만 적어 OpenCode·Claude 어댑터가 빠져 있고, 41행 "실행 상태는 기존 앱 전역 `agents` 2개 행을 유지"는 등록마다 상태 행을 만드는 7회차 변경 이후 사용자 등록 수만큼 늘어날 수 있어 부정확해. 둘 다 같은 성격의 한 줄 정정이라 다음 회차에 함께 처리하면 정리돼.
+  3. 화면 검증 공백 — provider 배선과 store 변경을 실제 WebView에서 볼 수단이 없어(WebView2 초기화 실패).
+  4. `create_lead_session`이 `add_session`과 별도 INSERT 문을 가져 컬럼 목록이 중복이야(22회차 기록). `chat_sessions`에 컬럼이 추가되면 두 곳을 같이 고쳐야 해.
+  5. 1단계 잔여 4건(GUI 실행 확인, `tauri-plugin-single-instance` 내부 경합, 원본 세션 전역 잠금=승인 대기, 종료 중 거절의 WebView 재현)은 그대로 차단 상태야.
+- 다음 작업: (1) 위 남은 문제 2번의 ARCHITECTURE.md 23·41행 두 줄 정정(문서 불일치 마무리) 또는 (2) 승인 시 실제 `claude -p` 캡처로 `parse_events` 확정. 승인이 계속 없으면 (3) `create_lead_session`의 중복 INSERT를 공통 헬퍼로 합치는 무동작 변경. 4단계(세션별 Lead/Reviewer 선택)는 3단계의 실제 CLI 근거가 생긴 뒤로.
+- 실행 메모(이 환경): `npm run build`가 `[safe-delete] ... ETIMEDOUT`으로 죽으면 `dist/`를 직접 지우고 재실행. Rust 테스트는 `mvp-app/src-tauri/`에서 `.tools/cargo/bin/cargo.exe`에 `CARGO_HOME`/`RUSTUP_HOME`/`PATH`를 `.tools`로 맞춰 `run_in_background` + 로그 파일로 돌릴 것(이번엔 증분이라 1분 내).
+
 ## CLI Lead 세션 행을 한 트랜잭션으로 완성 (2026-10-26, 3단계 여덟 번째 조각)
 
 - 선택한 작업: 19회차가 남긴 미해결 3번 "`create_lead_session`의 두 커밋". OpenCode·Claude 세션을 만들 때 `add_session`이 **자기 트랜잭션으로 먼저 커밋**하고 그 뒤에 `provider`·`agent_instance_id`를 UPDATE했어. 그 사이에 다른 스레드가 snapshot을 읽으면 **Lead 등록이 소유한 세션이 `provider='codex'`인 행으로 보이고**, UPDATE가 실패하면 그 `codex` 행이 유령 세션으로 DB에 남았어. 3단계에서 Claude 세션이 화면에서 도달 가능해진 뒤로는 이 경로가 실제로 쓰이므로 먼저 닫았어.
