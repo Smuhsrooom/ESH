@@ -1,5 +1,31 @@
 # ESH 진행 상태와 개발 인계
 
+## CLI Lead 세션 행을 한 트랜잭션으로 완성 (2026-10-26, 3단계 여덟 번째 조각)
+
+- 선택한 작업: 19회차가 남긴 미해결 3번 "`create_lead_session`의 두 커밋". OpenCode·Claude 세션을 만들 때 `add_session`이 **자기 트랜잭션으로 먼저 커밋**하고 그 뒤에 `provider`·`agent_instance_id`를 UPDATE했어. 그 사이에 다른 스레드가 snapshot을 읽으면 **Lead 등록이 소유한 세션이 `provider='codex'`인 행으로 보이고**, UPDATE가 실패하면 그 `codex` 행이 유령 세션으로 DB에 남았어. 3단계에서 Claude 세션이 화면에서 도달 가능해진 뒤로는 이 경로가 실제로 쓰이므로 먼저 닫았어.
+- 변경 파일: `mvp-app/src-tauri/src/workspace.rs` 1개.
+  - `create_lead_session`이 `add_session`을 부르지 않고 **`INSERT INTO chat_sessions(... provider, agent_instance_id ...)` 한 문장 + `meta.revision` 증가를 같은 트랜잭션**에서 수행해. 이제 세션 행이 처음 관측되는 순간부터 provider와 소유 등록이 확정돼 있어. `changed != 1` 검사는 "행이 없을 수 있다"는 전제 자체가 사라져 필요 없어졌고, 실패 시 부분 행이 남지 않아.
+  - `add_session`은 **손대지 않았어**. `create_session`(등록 없는 Codex 기본 세션)과 `import_codex_session`(copy/resume)은 여전히 `add_session`을 써. `add_session`의 중복 방지는 원래도 `(room_id, source_thread_id, mode)` 부분 유니크 인덱스에만 걸려 있고 이름 중복 제약은 없어서, Lead 경로가 그 검사를 잃는 것은 아니야(이름 중복은 이전에도 막히지 않았어). 실패 문구는 `add_session`과 같은 문자열로 맞췄어.
+- 동작 보존: 만들어지는 세션의 최종 값(`provider`, `agent_instance_id`, `mode='new'`, `thread_id=None`, 빈 `session_id`, `model`/`reasoning_effort` NULL)은 이전과 같고, 반환값과 저장 행이 일치해. 달라진 것은 (1) 같은 세션 생성에 대해 `meta.revision`이 **2가 아니라 1** 오른다는 것, (2) 그 사이 상태(`codex` 행)가 관측되지 않는다는 것, (3) 실패 시 부분 행이 남지 않는다는 것이야. Blocking Delegation, `request_arch_review`, `archReview`/`latestUserRequirements` 구조적 분리, `tool_deliveries`, 종료 순서, Arch 타임아웃 120초(범위 30~600), 단일 worker, DB 스키마·`user_version=6`, 실행 파일 이름 `esh-chat-mvp4` 모두 그대로야. 새 Tauri 명령·스키마 변경·프런트 변경은 없어.
+- 검증 (실제 출력):
+  - `cargo test --bin esh-chat-mvp4` (`mvp-app/src-tauri/`에서 프로젝트 상위 `.tools`의 cargo 직접 실행) → `test result: ok. 89 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.68s` (기존 88 → 89, 순증 1). 신규 `workspace::tests::a_lead_session_is_one_published_change_with_no_placeholder_row` → `ok`. Rust 경고는 기존 2건(`agents.rs`의 `Authenticated`·`Required`·`Error`, `Ready` 미생성 variant)뿐이고 새 경고는 없어.
+  - 기준선 먼저 측정: 변경 전 같은 트리에서 `test result: ok. 88 passed; 0 failed` (`mvp-app/evidence/ct-baseline-r22.log`). 변경 후 로그는 `mvp-app/evidence/ct-r22.log`(둘 다 gitignore 대상).
+  - `node scripts/verify_external_threads.mjs` → `{"passed":true,"recordedRows":27,"scratchRowsHidden":9,"normalConversationsPreserved":true}` (변경 전후 동일)
+  - `npm run build` (`tsc -b && vite build`) → `✓ 298 modules transformed`, `✓ built in 13.68s` (`dist/assets/index-CXzmrCQ4.js` 433.84 kB, `index-YBSTmYxd.css` 52.24 kB, `guiProbe-Ec5GCOO9.js` 45.64 kB). **JS·CSS 해시 모두 이전 회차와 동일** — Rust만 바꿨으므로 맞아. Tailwind 후보 오염도 없어.
+- 신규 테스트가 실제로 확인한 것: (1) OpenCode Lead 등록으로 세션을 만들면 `meta.revision`이 **정확히 1** 오른다(이전 구현은 2), (2) 저장된 행이 `provider='opencode'`·`agent_instance_id=등록 ID`·`mode='new'`·`thread_id=None`으로 **처음부터** 완성돼 있다, (3) 존재하지 않는 룸으로 만들면 `세션 추가 실패`로 거절되고 **revision도 세션 수(행 개수)도 변하지 않는다**(부분 행 없음).
+- 이 검증의 경계(중요):
+  - **"두 커밋 사이에 읽는 소비자가 있다"는 것을 직접 재현한 검증은 아니야.** 단위 테스트는 한 스레드에서 결과 상태만 확인했어(리비전 1회, 행 완성, 실패 시 무변경). 경합 자체는 트랜잭션 경계로 없앤 것이고 관측으로 증명한 것은 아니야.
+  - `create_session` Tauri 명령은 `AppHandle`(`Engine`) 의존이라 여전히 단위 테스트로 호출하지 못했어. 검사한 것은 그 명령이 부르는 store 함수야.
+  - 실제 `claude -p`, `python scripts/verify_*.py`, WebView, 데스크톱 빌드는 실행하지 않았어(변경이 Rust store 계층이고 실행 중인 앱을 건드리지 않으려고).
+- 남은 문제:
+  1. **승인 대기(변동 없음)**: 실제 `claude -p` 1회로 stream-json 원문 캡처(외부 데이터 전송 + 계정 사용량). 이때까지 `parse_events`는 공개 문서 기준이야.
+  2. **문서 불일치(계속 열림, 이번에도 손대지 않음)**: `docs/ARCHITECTURE.md` 35행("Claude Code와 Gemini CLI는 … 실행 연결은 아직 미지원")과 99행("나머지 신규 인스턴스는 `not_configured`/`unsupported`")이 등록 조각(9844058)과 배선 조각(9d4b238) 이후 사실과 달라. 이번 회차는 store 계층만 고쳤고 문서 확장은 범위 밖이라 그대로 뒀어.
+  3. 화면 검증 공백 — provider 배선과 이번 store 변경을 실제 WebView에서 볼 수단이 없어(WebView2 초기화 실패).
+  4. `create_lead_session`은 이제 `add_session`과 **별도 INSERT 문**을 갖게 됐어(컬럼 목록 중복). `add_session`이 새 컬럼을 얻으면 두 곳을 같이 고쳐야 해. 지금은 문장 하나라 감수했고, 필요하면 나중에 공통 헬퍼로 합칠 수 있어.
+  5. 1단계 잔여 4건(GUI 실행 확인, `tauri-plugin-single-instance` 내부 경합, 원본 세션 전역 잠금=승인 대기, 종료 중 거절의 WebView 재현)은 그대로 차단 상태야.
+- 다음 작업: (1) `docs/ARCHITECTURE.md` 35·99행 두 줄 정정 — 이제 세 회차째 미뤄 둔 항목이라 다음 회차에 먼저 처리하는 편이 좋아. 또는 (2) 승인 시 실제 `claude -p` 캡처로 `parse_events` 확정. 승인이 계속 없으면 (3) `guiProbe.ts`에 턴 전송 없는 provider 배선 점검 모드. 4단계(세션별 Lead/Reviewer 선택)는 3단계의 실제 CLI 근거가 생긴 뒤로.
+- 실행 메모(이 환경): Rust 테스트는 `mvp-app/src-tauri/`에서 `.tools/cargo/bin/cargo.exe`에 `CARGO_HOME`/`RUSTUP_HOME`/`PATH`를 `.tools`로 맞춰 `run_in_background` + 로그 파일로 돌릴 것. 이번 회차는 증분 컴파일이 짧아 1~2분 안에 끝났어(전체 재컴파일은 12~15분).
+
 ## 화면의 메시지 대상과 Lead UI를 세션 provider에서 정함 (2026-10-26, 3단계 일곱 번째 조각)
 
 - 선택한 작업: 3단계(추가 CLI 어댑터)의 다음 조각으로 지난 회차가 남긴 (d) "화면 배선". 그때까지 `main.tsx`는 전송 대상을 `isOpenCode ? 'opencode' : 'codex'`로 정해서 **Claude Code 세션은 `target='codex'`로 보내져 `turn_route`가 거절**했고, 세션 생성 드롭다운은 `provider === 'opencode'`만 나열해 화면에서 Claude Lead를 고를 수 없었고, `main` 메시지 필터에 `claude_code`가 없어 답변이 와도 목록에 뜨지 않았어.
