@@ -211,21 +211,39 @@ impl Store {
             _ => Err("이 에이전트로는 대화 세션을 만들 수 없습니다".into()),
         }
     }
-    /// The write both CLI Leads share: the provider and the owning registration
-    /// land in one statement with the revision bump, so no revision is published
-    /// carrying only one of the two. `add_session` commits the row first, so a
-    /// reader can still observe the session between the two commits.
+    /// The write both CLI Leads share. The row is inserted with its provider and
+    /// owning registration already in place, in the same transaction as the
+    /// revision bump. The previous version inserted through `add_session` (which
+    /// commits on its own) and then patched the provider, so a snapshot emitted
+    /// between the two commits showed a Lead-owned session as a `codex` one, and
+    /// a failed patch left that `codex` row behind as a phantom session.
     fn create_lead_session(&self, room_id: &str, value: &str, instance_id: &str, provider: &str) -> Result<Session> {
-        let mut created = self.add_session(room_id, value, None, "new", &[])?;
+        let value = name(value)?;
+        let id = uuid::Uuid::new_v4().to_string();
+        let at = timestamp();
         let mut db = self.db.lock().map_err(err)?;
         let tx = db.transaction().map_err(err)?;
-        let changed = tx.execute("UPDATE chat_sessions SET provider=?1,agent_instance_id=?2 WHERE id=?3", params![provider, instance_id, created.id]).map_err(err)?;
-        if changed != 1 { return Err("세션을 찾을 수 없습니다".into()); }
+        tx.execute(
+            "INSERT INTO chat_sessions(id,room_id,name,provider,agent_instance_id,mode,created_at) VALUES(?1,?2,?3,?4,?5,'new',?6)",
+            params![id, room_id, value, provider, instance_id, at],
+        )
+        .map_err(|e| format!("세션 추가 실패 (대상 룸이나 중복 추가를 확인해 주세요): {e}"))?;
         tx.execute("UPDATE meta SET revision=revision+1", []).map_err(err)?;
         tx.commit().map_err(err)?;
-        created.provider = provider.into();
-        created.agent_instance_id = Some(instance_id.into());
-        Ok(created)
+        Ok(Session {
+            id,
+            session_id: String::new(),
+            created_at: at,
+            room_id: room_id.into(),
+            name: value,
+            thread_id: None,
+            source_thread_id: None,
+            mode: "new".into(),
+            model: None,
+            reasoning_effort: None,
+            provider: provider.into(),
+            agent_instance_id: Some(instance_id.into()),
+        })
     }
     pub fn session(&self, id: &str) -> Result<Session> {
         sessions(&*self.db.lock().map_err(err)?)?
@@ -477,6 +495,35 @@ mod tests {
         drop(s);
         let restored = Store::open(&d.path().join("claude.db")).unwrap();
         assert_eq!(restored.session(&created.id).unwrap().provider, "claude_code");
+    }
+
+    #[test]
+    fn a_lead_session_is_one_published_change_with_no_placeholder_row() {
+        let d = tempfile::tempdir().unwrap();
+        let s = Store::open(&d.path().join("lead.db")).unwrap();
+        let cli = d.path().join("node_modules/opencode-ai/bin/opencode.exe");
+        std::fs::create_dir_all(cli.parent().unwrap()).unwrap();
+        std::fs::write(&cli, b"probe only").unwrap();
+        let lead = s.register_agent_instance("opencode", &cli.to_string_lossy(), "lead").unwrap();
+        let before = s.snapshot().unwrap().revision;
+        let created = s.create_opencode_session("default", "Lead one", &lead.id).unwrap();
+        // One created session is one publishable change. The previous version
+        // inserted the row through `add_session` and patched the provider after,
+        // so it bumped the revision twice for the same session.
+        assert_eq!(s.snapshot().unwrap().revision - before, 1);
+        // The row never exists in a `codex` shape: the provider and the owning
+        // registration come from the insert itself.
+        let saved = s.session(&created.id).unwrap();
+        assert_eq!((saved.provider.as_str(), saved.agent_instance_id.as_deref()), ("opencode", Some(lead.id.as_str())));
+        assert_eq!((saved.name.as_str(), saved.mode.as_str(), saved.thread_id.as_deref()), ("Lead one", "new", None));
+
+        // A rejected room leaves neither a session row nor a revision bump.
+        let after = s.snapshot().unwrap().revision;
+        let sessions_before = s.snapshot().unwrap().sessions.len();
+        let error = s.create_opencode_session("no-such-room", "orphan", &lead.id).err().expect("missing room");
+        assert!(error.contains("세션 추가 실패"), "{error}");
+        assert_eq!(s.snapshot().unwrap().revision, after);
+        assert_eq!(s.snapshot().unwrap().sessions.len(), sessions_before);
     }
 
     #[test]
