@@ -73,14 +73,38 @@ fn provider(provider: &str) -> Result<(&'static str, &'static str)> {
         .ok_or_else(|| "지원 후보 목록에 없는 에이전트 종류입니다".into())
 }
 
+/// A user registration becomes `supported` only when its executable sits where
+/// the adapter's invocation contract was written for: the OpenCode npm shim, or
+/// the Claude Code native install directory. The stored path decides that, and
+/// `connection_kind` comes from the same predicate, so the connection a
+/// registration reports and the role it activates cannot disagree.
+fn recognized_install(provider: &str, path: &str) -> bool {
+    let path = path.replace('\\', "/").to_lowercase();
+    match provider {
+        "opencode" => path.ends_with("/node_modules/opencode-ai/bin/opencode.exe"),
+        "claude_code" => path.ends_with("/.local/bin/claude.exe"),
+        _ => false,
+    }
+}
+
+fn connection_kind(provider: &str, role: &str, path: &str) -> &'static str {
+    if role != "lead" || !recognized_install(provider, path) { return "not_configured"; }
+    match provider {
+        "opencode" => "opencode_cli_json",
+        "claude_code" => crate::claude::CONNECTION_KIND,
+        _ => "not_configured",
+    }
+}
+
 fn active_role(provider: &str, connection: &str, role: &str, builtin: bool, path: Option<&str>) -> Option<&'static str> {
-    if !builtin && !(provider == "opencode" && path.is_some_and(|p| p.replace('\\', "/").to_lowercase().ends_with("/node_modules/opencode-ai/bin/opencode.exe"))) { return None; }
+    if !builtin && !path.is_some_and(|p| recognized_install(provider, p)) { return None; }
     registered().iter().find_map(|adapter| {
         let descriptor = adapter.descriptor();
         let expected_connection = match descriptor.connection {
             ConnectionKind::AppServerStdioJsonRpc => "app_server_stdio_json_rpc",
             ConnectionKind::AgyCliStreamJson => "agy_cli_stream_json",
             ConnectionKind::OpenCodeCliJson => "opencode_cli_json",
+            ConnectionKind::ClaudeCodeCli => crate::claude::CONNECTION_KIND,
             #[cfg(test)] ConnectionKind::MockInProcess => "mock_in_process",
         };
         if descriptor.id != provider || connection != expected_connection { return None; }
@@ -187,7 +211,7 @@ impl Store {
         let mut db = self.db.lock().map_err(err)?;
         let exists: Option<String> = db.query_row("SELECT id FROM agent_instances WHERE provider=?1 AND path_key=?2", params![provider_id,key], |r| r.get(0)).optional().map_err(err)?;
         if exists.is_some() { return Err("이미 등록된 실행 파일입니다".into()); }
-        let connection = if provider_id == "opencode" && role == "lead" && path_text.replace('\\', "/").to_lowercase().ends_with("/node_modules/opencode-ai/bin/opencode.exe") { "opencode_cli_json" } else { "not_configured" };
+        let connection = connection_kind(provider_id, role, &path_text);
         // The instance row, its execution-status row, and the revision that makes
         // the change visible to snapshot consumers commit together, so the WebView
         // never sees a registration without the row that explains its status.
@@ -198,10 +222,10 @@ impl Store {
         // (`snapshot.agents.length`) and the Agents view list the same agents.
         // An instance without an execution connection cannot report a run
         // state, so its row stays `unknown` instead of pretending to be idle.
-        let (status, detail) = if connection == "opencode_cli_json" {
-            ("idle", "대기 중")
-        } else {
+        let (status, detail) = if connection == "not_configured" {
             ("unknown", "실행 연결이 설정되지 않았습니다")
+        } else {
+            ("idle", "대기 중")
         };
         tx.execute(
             "INSERT OR IGNORE INTO agents(id,status,detail,updated_at) VALUES(?1,?2,?3,?4)",
@@ -464,6 +488,52 @@ mod tests {
         let saved = reopened.session(&session.id).unwrap();
         assert_eq!((saved.provider.as_str(), saved.agent_instance_id.as_deref()), ("opencode", Some(instance.id.as_str())));
         assert_eq!(reopened.list_agent_instances().unwrap().into_iter().find(|a| a.id == instance.id).unwrap().active_role, Some("lead"));
+    }
+
+    #[test]
+    fn a_claude_registration_at_the_installed_layout_becomes_a_runnable_lead() {
+        let temp = tempfile::tempdir().unwrap();
+        let exe = temp.path().join(".local/bin/claude.exe");
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        std::fs::write(&exe, b"probe only").unwrap();
+        let path = temp.path().join("chat.sqlite");
+        let store = Store::open(&path).unwrap();
+        let item = store.register_agent_instance("claude_code", &exe.to_string_lossy(), "lead").unwrap();
+        // The adapter claims this connection, so the registration is supported
+        // while authentication and availability stay unknown: a file check is
+        // not a login and not a usable model.
+        assert_eq!((item.connection.as_str(), item.active_role), (crate::claude::CONNECTION_KIND, Some("lead")));
+        assert_eq!((item.support, item.authentication, item.availability), ("supported", "unknown", "unknown"));
+        // A runnable connection owns an idle status row instead of `unknown`.
+        let row = store.snapshot().unwrap().agents.into_iter().find(|a| a.id == item.id).unwrap();
+        assert_eq!((row.status.as_str(), row.detail.as_str()), ("idle", "대기 중"));
+        // The session path opens on the same registration, and the session keeps
+        // the provider the registration names.
+        let session = store.create_agent_session("default", "Claude test", &item.id).unwrap();
+        assert_eq!((session.provider.as_str(), session.agent_instance_id.as_deref()), ("claude_code", Some(item.id.as_str())));
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        let saved = reopened.list_agent_instances().unwrap().into_iter().find(|a| a.id == item.id).unwrap();
+        assert_eq!((saved.active_role, saved.support), (Some("lead"), "supported"));
+        assert_eq!(reopened.session(&session.id).unwrap().provider, "claude_code");
+    }
+
+    #[test]
+    fn a_claude_registration_outside_the_installed_layout_stays_unsupported() {
+        // The same file name in another directory is not the layout the
+        // invocation contract was written for, so it must not report support.
+        let temp = tempfile::tempdir().unwrap();
+        let exe = temp.path().join("bin/claude.exe");
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        std::fs::write(&exe, b"probe only").unwrap();
+        let store = Store::open(&temp.path().join("chat.sqlite")).unwrap();
+        let item = store.register_agent_instance("claude_code", &exe.to_string_lossy(), "lead").unwrap();
+        assert_eq!((item.connection.as_str(), item.active_role), ("not_configured", None));
+        assert_eq!((item.support, item.availability), ("unsupported", "unavailable"));
+        let row = store.snapshot().unwrap().agents.into_iter().find(|a| a.id == item.id).unwrap();
+        assert_eq!((row.status.as_str(), row.detail.as_str()), ("unknown", "실행 연결이 설정되지 않았습니다"));
+        let error = store.create_agent_session("default", "Claude test", &item.id).err().expect("no connection");
+        assert!(error.contains("실행 연결이 설정되지 않은"), "{error}");
     }
 
     #[test]

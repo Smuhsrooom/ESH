@@ -74,10 +74,10 @@ fn turn_route(session: &Session, target: &str) -> Option<TurnRoute> {
             _ => None,
         },
         "opencode" => (target == "opencode").then_some(TurnRoute::OpenCode),
-        // Claude Code answers its own sessions only. The branch exists here so
-        // that adding the provider cannot fall through to Codex, but nothing can
-        // reach it yet: no command creates a `claude_code` session, and `submit`
-        // still refuses the `claude_code` target because no adapter advertises it.
+        // Claude Code answers its own sessions only. A session can only be
+        // created from a registration the adapter claims, and `submit` only
+        // accepts the `claude_code` target because that adapter is registered,
+        // so this branch stays unreachable for every other provider.
         "claude_code" => (target == "claude_code").then_some(TurnRoute::Claude),
         _ => None,
     }
@@ -154,11 +154,12 @@ fn commit_lead_answer(
 
 /// Resolves the registered Claude Code CLI that owns this session.
 ///
-/// The check reads the stored `role` rather than `active_role`: no adapter
-/// advertises Claude yet, so `active_role` is still `None` for a Claude
-/// registration. Registering the adapter is the slice that promotes it to
-/// `supported`, and that slice has to land together with the session path so the
-/// claim matches a runnable turn.
+/// The check reads `active_role`, not the stored `role`: the adapter now
+/// advertises the connection, so a registration only reaches `lead` here when
+/// its executable is at the layout the invocation contract was written for and
+/// the adapter claims it. A registration stored elsewhere keeps
+/// `connection_kind = not_configured`, so it can neither own a session nor be
+/// answered by this branch — the same rule the OpenCode turn already follows.
 fn claude_runner(store: &Store, session: &Session) -> Result<(String, PathBuf)> {
     if session.provider != "claude_code" {
         return Err("Claude Code 세션이 아닙니다".into());
@@ -172,7 +173,7 @@ fn claude_runner(store: &Store, session: &Session) -> Result<(String, PathBuf)> 
         .into_iter()
         .find(|i| i.id == id)
         .ok_or("Claude Code 등록을 찾을 수 없습니다")?;
-    if instance.role != "lead" || instance.installation != "installed" {
+    if instance.active_role != Some("lead") || instance.installation != "installed" {
         return Err("등록된 Claude Code CLI가 실행 가능하지 않습니다".into());
     }
     let path = instance.path.ok_or("Claude Code 실행 파일 경로가 없습니다")?;
@@ -1073,9 +1074,9 @@ impl Engine {
 
     /// One Claude Code turn. The CLI runs as a fresh process per turn and resumes
     /// the saved conversation id, so an answer never depends on a process that
-    /// outlived the previous turn. The turn is not reachable yet: no command
-    /// creates a `claude_code` session and `submit` still refuses that target
-    /// because no adapter advertises it.
+    /// outlived the previous turn. The session and its registration are both
+    /// required, and `claude_runner` refuses a registration the adapter does not
+    /// claim, so the branch cannot run a CLI that was never mapped.
     async fn claude_turn(&self, user: &Message, stop: watch::Receiver<bool>) -> Result<()> {
         let saved = self.store.session(&user.chat_session_id)?;
         let (instance_id, path) = claude_runner(&self.store, &saved)?;
@@ -1333,7 +1334,10 @@ mod claude_runner_tests {
     }
 
     fn register(dir: &std::path::Path, store: &Store, role: &str) -> String {
-        let exe = dir.join("claude.exe");
+        // The adapter only claims the native install layout, so the fixture has
+        // to sit where a real `claude.exe` does.
+        let exe = dir.join(".local/bin/claude.exe");
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
         std::fs::write(&exe, b"probe only").unwrap();
         store
             .register_agent_instance("claude_code", &exe.to_string_lossy(), role)
@@ -1357,7 +1361,7 @@ mod claude_runner_tests {
     fn only_a_claude_session_with_a_runnable_lead_registration_resolves() {
         let (dir, store) = new_store();
         let instance = register(dir.path(), &store, "lead");
-        let exe = std::fs::canonicalize(dir.path().join("claude.exe")).unwrap();
+        let exe = std::fs::canonicalize(dir.path().join(".local/bin/claude.exe")).unwrap();
 
         // A Codex session must never be answered by the Claude branch.
         let codex = store.session("default-session").unwrap();
@@ -1392,9 +1396,30 @@ mod claude_runner_tests {
         let (dir2, store2) = new_store();
         let lead = register(dir2.path(), &store2, "lead");
         point(&store2, "claude_code", Some(&lead));
-        std::fs::remove_file(dir2.path().join("claude.exe")).unwrap();
+        std::fs::remove_file(dir2.path().join(".local/bin/claude.exe")).unwrap();
         let saved = store2.session("default-session").unwrap();
         assert!(claude_runner(&store2, &saved).unwrap_err().contains("실행 가능하지 않습니다"));
+    }
+
+    #[test]
+    fn a_lead_registration_outside_the_claimed_layout_never_runs() {
+        // `role` alone used to decide this. The adapter only claims the native
+        // install directory, so an executable registered anywhere else keeps
+        // `connection_kind = not_configured` and must not answer a turn.
+        let (dir, store) = new_store();
+        let exe = dir.path().join("bin/claude.exe");
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        std::fs::write(&exe, b"probe only").unwrap();
+        let instance = store
+            .register_agent_instance("claude_code", &exe.to_string_lossy(), "lead")
+            .unwrap();
+        assert_eq!(
+            (instance.connection.as_str(), instance.active_role),
+            ("not_configured", None)
+        );
+        point(&store, "claude_code", Some(&instance.id));
+        let saved = store.session("default-session").unwrap();
+        assert!(claude_runner(&store, &saved).unwrap_err().contains("실행 가능하지 않습니다"));
     }
 }
 

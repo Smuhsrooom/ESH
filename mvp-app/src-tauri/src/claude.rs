@@ -1,15 +1,16 @@
 //! Claude Code Lead protocol skeleton and turn runner.
 //!
 //! This module defines the invocation contract, the stream-json result
-//! classification and the one-process-per-turn runner for a future
-//! `claude_code_cli` Lead adapter. `Engine::claude_turn` calls `run` for a
-//! session whose provider is `claude_code`, and `Store::create_claude_session`
-//! can now create one, but only for a registration that already carries
-//! `CONNECTION_KIND`. Nothing assigns that kind yet: registration writes
-//! `not_configured` and no adapter advertises `claude_code`, so `submit` still
-//! refuses the `claude_code` target and no turn can reach the CLI. The adapter
-//! registration is the remaining change, and it is the step that would make a
-//! real `claude -p` run reachable, so it needs the pending approval first.
+//! classification and the one-process-per-turn runner for the `claude_code_cli`
+//! Lead adapter. `Engine::claude_turn` calls `run` for a session whose provider
+//! is `claude_code`, `Store::create_claude_session` creates one from a
+//! registration that carries `CONNECTION_KIND`, and `agents::ClaudeCodeAdapter`
+//! now advertises that connection. A registration only receives the kind when
+//! its executable sits at the native install layout (`.local/bin/claude.exe`),
+//! so a registration stored anywhere else stays `not_configured` and cannot own
+//! a session or answer a turn. No chat UI offers the Claude Lead as a session
+//! agent yet, so a turn is reachable through the commands, not through the
+//! screen.
 //!
 //! Evidence boundary:
 //! - The flags and values in `command_args` are checked against the help text
