@@ -1,5 +1,37 @@
 # ESH 진행 상태와 개발 인계
 
+## Claude Code 연결을 등록에 부여하고 턴 해석을 `active_role`로 좁힘 (2026-10-26, 3단계 여섯 번째 조각)
+
+- 선택한 작업: 3단계(추가 CLI 어댑터)의 다음 조각으로 지난 회차가 남긴 (c) "`agents.rs`+`registry.rs` 등록 조각". 그때까지 `register_agent_instance`는 OpenCode npm shim만 `connection_kind`를 부여하고 나머지는 `not_configured`로 두었고, `ClaudeCodeAdapter`가 없어 `claude_runner`가 `role`을 봐야 했다. 이번에 등록이 Claude Code 연결을 받고, 어댑터가 그 연결을 광고하며, 턴 해석이 `role` 대신 `active_role`을 보도록 **한 조각에서** 맞췄어.
+- 변경 파일 6개(그중 3개는 한 줄 수준): `mvp-app/src-tauri/src/agents.rs`, `mvp-app/src-tauri/src/registry.rs`, `mvp-app/src-tauri/src/engine.rs`, `mvp-app/src-tauri/src/mock_agent.rs`(테스트 인덱스), `mvp-app/src-tauri/src/claude.rs`(모듈 주석만), `mvp-app/src/AgentsView.tsx`(연결 방식 라벨 맵).
+  - `agents.rs`: `ConnectionKind::ClaudeCodeCli` 추가, `ClaudeCodeAdapter`/`CLAUDE` + descriptor(id `claude_code`, Lead, `lead_conversation`·`persistent_session`·`cancellation`만 true, `streaming`·`model_catalog`·`context_compaction`·`tool_call_bridge`·`delegated_review` false), `registered()`를 4개로 확장. `probe_install`에 Claude 분기(`ESH_CLAUDE_BIN` → `~/.local/bin/claude.exe`)를 넣고, 그 전까지 Claude가 **agy 경로로 점검되던** 문제를 없앴어(이전 `else` 분기가 `ESH_AGY_BIN`/`agy.exe`를 반환).
+  - `registry.rs`: `recognized_install(provider, path)` 하나로 "이 실행 파일이 계약을 쓴 그 설치 위치인가"를 판정하고, `connection_kind()`가 같은 판정으로 `opencode_cli_json`/`claude_code_cli`를 부여해. `active_role`의 기존 OpenCode 하드코딩 가드도 같은 함수로 교체. 상태 행은 `connection != not_configured`면 `idle`, 아니면 기존처럼 `unknown`+`실행 연결이 설정되지 않았습니다`.
+  - `engine.rs`: `claude_runner`의 검사를 `instance.role != "lead"` → `instance.active_role != Some("lead")`로 좁혀 OpenCode 턴과 같은 규칙으로 맞췄어. 이제 계약 위치가 아닌 곳에 등록한 Lead는 `not_configured`로 남아 턴이 거절돼.
+  - `AgentsView.tsx`: `connection === 'opencode_cli_json' ? 'OpenCode CLI · JSON' : '설정 필요'` 삼항을 `connectionLabels` 맵으로 바꿔, 지원되는 Claude 등록이 상세 화면에서 **`지원: 지원`인데 `연결 방식: 설정 필요`로 표시되던** 모순을 없앴어.
+  - `mock_agent.rs`: `registered()` 크기가 3→4가 되어 `production.len()`과 `test_registry[3]` 인덱스만 고쳤어(동작 변경 없음).
+- **`support` 표기의 의미(중요)**: 이제 계약 위치(`~/.local/bin/claude.exe`)에 Lead로 등록하면 `connection_kind=claude_code_cli`, `active_role=lead`, `support=supported`, `availability=unknown`이 돼. 이는 "Adapter ID·연결 방식·capability가 일치한다"는 어댑터 수준 표기야(ARCHITECTURE.md의 활성 역할 정의). 인증·모델 사용 가능 여부는 파일 점검으로 알 수 없어 `unknown`으로 남겼고, **화면에서 Claude 세션을 만들 수는 아직 없어**(아래 남은 문제 2번).
+- 동작 보존: Codex·Antigravity·OpenCode 등록의 판정·문구·상태 행은 같아(OpenCode는 같은 판정 함수로 옮겨 쓴 것뿐). 계약 위치가 아닌 곳에 등록한 Claude Lead는 이전과 똑같이 `not_configured`/`unsupported`/`unknown`이고 세션도 만들어지지 않아. Blocking Delegation, `request_arch_review`, `archReview`/`latestUserRequirements` 구조적 분리, `tool_deliveries`, 종료 순서, Arch 타임아웃 120초(범위 30~600), 단일 worker, DB 스키마·`user_version=6`, 실행 파일 이름 `esh-chat-mvp4` 모두 그대로야. 새 Tauri 명령·스키마 변경은 없어(기존 `agent_instances.connection_kind` 값 집합에 `claude_code_cli`가 추가될 뿐).
+- 검증 (실제 출력):
+  - `cargo test --bin esh-chat-mvp4` (프로젝트 상위 `.tools`의 cargo를 `src-tauri/`에서 직접 실행) → `test result: ok. 88 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.66s` (기존 84 → 88, 순증 4). 신규: `agents::tests::claude_code_is_advertised_as_a_conversation_only_lead`, `registry::tests::a_claude_registration_at_the_installed_layout_becomes_a_runnable_lead`, `registry::tests::a_claude_registration_outside_the_installed_layout_stays_unsupported`, `engine::claude_runner_tests::a_lead_registration_outside_the_claimed_layout_never_runs` — 모두 `ok`. 수정: `mock_agent::tests::mock_is_a_distinct_test_only_registry_entry_and_is_hidden_by_default`(인덱스), `engine::claude_runner_tests::*` 2개(픽스처 경로를 `.local/bin/claude.exe`로) — 모두 `ok`. Rust 경고는 기존 2건(`agents.rs`의 `Authenticated`·`Required`·`Error`, `Ready` 미생성 variant)뿐이고 새 경고는 없어.
+  - `node scripts/verify_external_threads.mjs` → `{"passed":true,"recordedRows":27,"scratchRowsHidden":9,"normalConversationsPreserved":true}`
+  - `npm run build` → `✓ built in 11.52s` (`dist/assets/index-BPKOmmcN.js` 433.34 kB, `index-YBSTmYxd.css` 52.24 kB, `guiProbe-BtYocZq_.js` 45.64 kB — AgentsView를 건드려 index 해시가 바뀐 것이 맞아. CSS 해시는 동일)
+  - 중간 실패 1건(정직하게 기록): 첫 컴파일에서 `registry.rs` 테스트가 `unwrap_err()`에 `Session: Debug`를 요구해 `error[E0277]`로 실패(exit 101). `unwrap_err()` → `.err().expect("no connection")`으로 고친 뒤 위 결과를 얻었어. 그 실패 로그는 `mvp-app/evidence/ct-bash.log`(gitignore 대상), 성공 로그는 `ct-bash2.log`에 있어.
+- 신규 테스트가 실제로 확인한 것: (1) 계약 위치에 Lead로 등록하면 `connection=claude_code_cli`·`active_role=lead`·`support=supported`·`authentication=unknown`·`availability=unknown`이고 상태 행이 `idle/대기 중`이며, 그 등록으로 `create_agent_session`이 `provider='claude_code'` 세션을 만들고 재시작 후에도 유지된다는 것, (2) 같은 파일명이라도 다른 디렉터리(`<tmp>/bin/claude.exe`)에 등록하면 `not_configured`/`unsupported`/`unavailable`/`unknown` 행으로 남고 세션이 만들어지지 않는다는 것, (3) `claude_runner`가 계약 위치 밖의 Lead 등록을 `실행 가능하지 않습니다`로 거절한다는 것(이전에는 `role`만 보고 통과했음), (4) Claude 어댑터가 `streaming`·`tool_call_bridge`·`model_catalog`·`context_compaction`을 광고하지 않고 연결 라벨이 다른 세 CLI와 구별된다는 것.
+- 이 검증의 경계(중요):
+  - **실제 `claude -p`는 여전히 한 번도 실행하지 않았어.** 등록·세션·턴 경로는 준비됐지만 `parse_events`는 공개 문서 기준 그대로야. 실제 CLI 캡처는 **승인 대기**.
+  - **화면에서 Claude 세션을 만들 수 없어.** `main.tsx`의 세션 생성 드롭다운은 `provider === 'opencode' && activeRole === 'lead'`만 나열하고, 전송도 `target: isOpenCode ? 'opencode' : 'codex'`야. 즉 Claude 세션은 Tauri 명령으로만 만들 수 있고, 만들더라도 화면 전송은 `target='codex'`라 `turn_route`가 거절해. 이 배선은 4단계(세션별 Lead 선택) 또는 다음 조각의 일이야.
+  - `Engine`이 `AppHandle`을 들고 있어 `submit`·`claude_turn` 자체는 단위 테스트로 호출하지 못했어. 테스트는 그 함수들이 읽는 등록·세션 행과 판정 함수(`claude_runner`)를 실제 SQLite로 검사한 것이고, 배선은 컴파일·코드 확인으로만 검증했어.
+  - `python scripts/verify_*.py`, WebView, 데스크톱 빌드는 실행하지 않았어(변경이 등록 판정과 라벨이고 실행 중인 앱을 건드리지 않으려고).
+- 남은 문제:
+  1. **승인 대기**: 실제 `claude -p` 1회로 stream-json 원문 캡처(외부 데이터 전송 + 계정 사용량). 이때까지 파서·턴 형태는 미확정.
+  2. **UI 배선 없음**: 세션 생성 드롭다운에 Claude Lead를 넣고, 전송 target을 세션 provider에서 정하고, `isOpenCode` 기준으로 갈라진 모델 선택·압축 UI를 provider 기준으로 정리해야 해. 그 전까지 Claude는 "등록·명령 경로만 있는" 상태야.
+  3. **문서 불일치(기록)**: `docs/ARCHITECTURE.md` 35행("Claude Code와 Gemini CLI는 … 실행 연결은 아직 미지원")과 99행("나머지 신규 인스턴스는 `not_configured`/`unsupported`")이 이번 변경으로 사실과 달라졌어. 이번 회차는 PROGRESS 기록만 하고 ARCHITECTURE는 건드리지 않았어(요청 범위 밖 문서 확장 금지).
+  4. 계약 위치를 `~/.local/bin/claude.exe` 하나로 고정했어. npm 등 다른 설치 위치의 `claude.exe`는 `not_configured`로 남아 지원 표기가 되지 않아(안전한 기본값이지만 실제 사용자 환경에 따라 false negative).
+  5. 도구 정책 미확정 — `--permission-mode plan`이 대화 전용 계약을 실제로 지키는지 미검증.
+  6. 1단계 잔여 4건(GUI 실행 확인, `tauri-plugin-single-instance` 내부 경합, 원본 세션 전역 잠금=승인 대기, 종료 중 거절의 WebView 재현)은 그대로 차단 상태야.
+- 다음 작업: (d) 화면 배선 — 세션 생성 드롭다운에 Claude Lead 추가 + 전송 target을 세션 provider로 + `isOpenCode`로 갈린 UI를 provider 기준으로. 승인을 받으면 그 전에 실제 `claude -p` 캡처로 `parse_events`를 확정하는 편이 좋아.
+- 실행 메모(이 환경): cargo는 **`mvp-app/src-tauri/`에서** 실행하고(`mvp-app/`에는 `Cargo.toml`이 없음), Bash 도구에서 바로 돌리면 출력 없이 SIGTERM으로 죽으니 `run_in_background`로 띄워 로그 파일로 받을 것. 이번 회차 컴파일은 12~15분 걸렸어(이전 회차의 2~3초는 테스트 실행 시간일 뿐). PowerShell 도구의 `Start-Process`는 이 세션의 `HTTPS_PROXY`/`https_proxy` 중복 키 때문에 실패해.
+
 ## 세션 종류를 등록에서 고르게 하고 Claude 세션 경로 추가 (2026-10-26, 3단계 다섯 번째 조각)
 
 - 선택한 작업: 3단계(추가 CLI 어댑터)의 다음 조각으로 지난 회차가 남긴 (b) "`workspace.rs`의 `create_claude_session` + `main.rs` `create_session`의 provider 분기". `create_session` 명령이 `agent_instance_id`를 **무조건** `create_opencode_session`으로 보내고 있어서, Claude Code 등록으로 세션을 만들면 OpenCode 문구로 실패했고 세션 종류가 한 provider에 고정돼 있었어.
