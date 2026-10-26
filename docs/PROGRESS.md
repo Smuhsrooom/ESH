@@ -1,5 +1,18 @@
 # ESH 진행 상태와 개발 인계
 
+## deny 설정의 OpenCode 실제 응답 확인과 `bot/codex-impl` 병합 (2026-10-27)
+
+- **OpenCode 실제 CLI 검사**: `opencode.rs::run`과 같은 인수(`run --pure --format json --agent plan --dir … --title`)와 같은 `OPENCODE_CONFIG_CONTENT={"permission":{"*":"deny"}}`로 npm OpenCode CLI 1.18.34를 GUI 밖에서 직접 실행했어. 선택 모델(`openrouter/cohere/north-mini-code:free`)과 기본 모델 두 경우 모두 종료 코드 0, `step_finish(reason=stop)`, 도구 호출 없음, 답변 `확인`/`예`, `Cannot connect to API` 없음. 보호 대상 OpenCode 설정·인증 파일 3,682개의 해시가 전후 같아. 근거: `mvp-app/evidence/opencode-deny-20261027/result.json`, 실행 스크립트 `run.ps1`. 첫 실행은 검사 스크립트가 stdout을 콘솔 코드페이지로 읽어 한글 답변이 깨진 기록이라 `first-run-garbled/`에 보존했어(OpenCode 자체는 성공).
+  - 결론: deny 설정은 OpenCode API 연결을 막지 않아. 10-26의 원인 분석은 틀렸어. 당시 `Cannot connect to API`의 실제 원인은 여전히 미확인이야.
+  - 경계: ESH 앱(WebView) 안의 OpenCode 턴은 실행하지 않았어. 자동화 환경에서 GUI를 띄우면 WebView2 프로필이 오염되는 문제가 있어(`.workbuddy-ai/memory/MEMORY.md`). 이 검사는 같은 명령줄 재현이지 ESH Engine 경로 검증이 아니야.
+- **병합**: `bot/codex-impl` 55커밋을 main에 `--no-ff`로 병합했어(`df9ec8f`). 코드 충돌은 없었고 `agents.rs`는 자동 병합돼 `#[allow(dead_code)]`와 `ClaudeCodeCli`가 함께 남았어. `opencode.rs`의 deny 설정도 유지돼. 충돌은 이 문서뿐이었고, main의 10-26·10-27 항목을 codex 브랜치 기록 위에 붙여 해결했어.
+- 병합 결과 검증 (실제 출력):
+  - `npm test` → `test result: ok. 90 passed; 0 failed`. 컴파일 경고 없음.
+  - `node scripts/verify_external_threads.mjs` → `{"passed":true,"recordedRows":27,"scratchRowsHidden":9,"normalConversationsPreserved":true}`
+  - `node scripts/verify_providers.mjs` → `{"passed":true,"targets":3,"refusedTargets":6,"codexOnlyControls":2,"wiredCallSites":5}`
+  - `npm run build:desktop` → 프런트 `298 modules transformed`, Rust `Finished`, 같은 `esh-chat-mvp4.exe` 갱신(2026-10-27 00:22).
+- 미검증: 병합된 exe의 실제 화면, Claude Code의 실제 `claude -p` 턴(승인 대기 그대로), 실제 Codex↔Antigravity 위임 회귀(`verify_live.py` 등 미실행).
+
 ## OpenCode deny 설정 복원 (2026-10-27)
 
 - 10-26에 제거한 `OPENCODE_CONFIG_CONTENT`의 `{"permission":{"*":"deny"}}`를 `opencode.rs`에 다시 넣었어. 이 설정이 없으면 OpenCode의 파일 수정·명령 실행을 프롬프트 문장으로만 막게 돼 `AGENTS.md`의 "파일 수정·셸 실행을 묵시적으로 활성화하지 마" 규칙과 맞지 않아.
