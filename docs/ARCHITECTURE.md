@@ -20,7 +20,7 @@
 | `mvp-app/src-tauri/src/context.rs` | 컨텍스트 사용량·압축 이벤트, 세션별 저장·복구 |
 | `mvp-app/src/ContextStatus.tsx` | 전송 버튼 옆 원형 사용률 표시와 상세 팝업의 최근/누적 토큰·압축 상태 |
 | `mvp-app/src-tauri/src/models.rs` | 실제 모델 카탈로그 타입과 모델별 추론 강도 검증 |
-| `mvp-app/src-tauri/src/agents.rs` | Codex Lead/Antigravity Reviewer 어댑터, ID·연결 방식·역할·capabilities와 역할별 실행 계약 |
+| `mvp-app/src-tauri/src/agents.rs` | 어댑터 4개(Codex·OpenCode·Claude Code Lead, Antigravity Reviewer), ID·연결 방식·역할·capabilities와 역할별 실행 계약 |
 | `mvp-app/src-tauri/src/registry.rs` | 허용된 CLI 파일명 탐지, ESH 내부 인스턴스 등록·해제, SQLite v5 추가 마이그레이션 |
 | `mvp-app/src-tauri/src/cli.rs` | Codex RPC, 프로세스 실행·정리, agy 구조화 결과 검사 |
 | `mvp-app/src-tauri/src/store.rs` | SQLite, 채널 migration, snapshot·버전·전달 기록 |
@@ -38,7 +38,7 @@
 
 오른쪽은 `collaboration` 채널의 `review_request`, `review_followup`, `review_reply`를 실제 collaborationId별 리뷰 스레드로 묶어 보여. 검토 기록이 없으면 처음에는 접혀 있고 기록이 생기면 열려. 목록 기본 폭은 360px, 상세 기본 폭은 560px이며 두 폭은 따로 조절·저장해. 목록에서 선택하면 해당 요청·후속 요청·응답만 상세 화면에 표시하고 뒤로 가기로 목록에 돌아와. 중앙 리뷰 링크로는 최신 스레드 상세에 바로 들어가. 사용자가 패널을 수동으로 접거나 펼친 뒤에는 자동 상태 전환을 멈춰. 리뷰 상태는 저장된 요청·응답·오류를 바탕으로 표시하며, 미응답 기록인데 현재 실행이 없으면 `Unknown`으로 둬. v0 목업의 가짜 승인 상태는 사용하지 않아. 사용자 입력 요소는 없어. Codex 진행 안내(`activity`)와 이전 Arch 직접 대화(`legacy`)는 왼쪽의 접힌 기록으로 분리돼.
 
-React hooks가 상태를 관리하고 `get_snapshot`과 `chat-updated` 이벤트가 DB 기반 전체 snapshot을 전달해. `revision`이 더 오래된 응답은 프런트에서 버려. 선택한 세션, 패널 너비, UI 테마는 localStorage에 저장돼. 테마는 왼쪽 하단 워크스페이스 메뉴에서 선택하며 기본·라일락·클래식 세 종류야. 실행 상태는 기존 앱 전역 `agents` 2개 행을 유지하며 세션별 상태 이력 테이블은 없어. 실행 중인 세션은 메모리의 `busySessionId`와 `activeRun(id/sessionId/cancelling)`으로 구분해 Agents 화면의 활성 상태에 세션·실행 ID를 연결해. 설치 등 probe 결과는 화면 메모리에만 있고 SQLite에 저장하지 않아.
+React hooks가 상태를 관리하고 `get_snapshot`과 `chat-updated` 이벤트가 DB 기반 전체 snapshot을 전달해. `revision`이 더 오래된 응답은 프런트에서 버려. 선택한 세션, 패널 너비, UI 테마는 localStorage에 저장돼. 테마는 왼쪽 하단 워크스페이스 메뉴에서 선택하며 기본·라일락·클래식 세 종류야. 실행 상태는 앱 전역 `agents` 행으로 유지해 — 내장 Codex·Antigravity 2개에 더해 등록한 인스턴스마다 상태 행이 하나씩 생기고, 세션별 상태 이력 테이블은 없어. 실행 중인 세션은 메모리의 `busySessionId`와 `activeRun(id/sessionId/cancelling)`으로 구분해 Agents 화면의 활성 상태에 세션·실행 ID를 연결해. 설치 등 probe 결과는 화면 메모리에만 있고 SQLite에 저장하지 않아.
 
 메인 창은 정상 종료 시 창의 크기·위치·최대화 여부를 앱 데이터 폴더의 `window-state.json`에 저장하고 다음 실행에서 복원해. `ESH_DATA_DIR`을 지정한 검증 실행은 상태 파일도 해당 격리 폴더에 둬. 첫 실행이나 읽을 수 없는 상태 파일에서는 기본 1600×900 창을 가운데에 표시해. Tauri의 `zoomHotkeysEnabled`로 WebView2 기본 확대·축소 단축키를 사용해. Ctrl+`+`/`-`로 화면 전체 배율을 조절해. 배율은 앱 데이터나 대화 DB에 저장하지 않아.
 
