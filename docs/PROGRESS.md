@@ -1,5 +1,29 @@
 # ESH 진행 상태와 개발 인계
 
+## 상태 행 백필이 등록이 획득한 연결을 그대로 쓰게 함 (2026-10-26, 3단계 안정화)
+
+- 선택한 작업: 지난 회차가 "다음 작업" 1순위로 남긴 `docs/ARCHITECTURE.md` 23·41행 정정 대신, 같은 조각(20회차 Claude 등록)이 남긴 **실제 코드 불일치**를 먼저 고쳤어. 근거는 이번에 코드를 대조하다 확인한 것 — `Store::open`의 상태 행 백필(`store.rs:148`)은 `connection_kind='opencode_cli_json'`만 `idle`로 판정하는데, 등록 경로(`registry.rs:225`)는 `connection_kind != 'not_configured'`면 `idle`이야. 그래서 **계약 위치(`~/.local/bin/claude.exe`)에 Lead로 등록해 `claude_code_cli`를 획득한 인스턴스**의 `agents` 행이 어떤 이유로 없으면, 재시작 후 백필이 그 행을 `unknown`/`실행 연결이 설정되지 않았습니다`로 되살려. 20회차에 `AgentsView`에서 없앤 것과 같은 종류의 거짓 표기("지원되는데 설정 필요")가 DB 계층에 남아 있던 셈이야.
+- 변경 파일 2개(코드 1 + 테스트 1): `mvp-app/src-tauri/src/store.rs`(백필 `CASE` 조건을 `connection_kind='not_configured'` 기준으로 뒤집고, 등록 경로와 같은 술어를 읽어야 하는 이유를 주석으로 남김), `mvp-app/src-tauri/src/registry.rs`(회귀 테스트 `a_backfilled_status_row_keeps_the_connection_the_registration_earned` 추가).
+- 동작 보존: 기존 행의 상태는 여전히 **덮어쓰지 않아**(`INSERT OR IGNORE`). `not_configured` 인스턴스는 이전과 똑같이 `unknown`/`실행 연결이 설정되지 않았습니다`야. 달라진 것은 **연결을 획득한 인스턴스의 행을 백필할 때** `idle`/`대기 중`이 된다는 것 하나뿐이고, 이는 등록 직후 값과 같아져 두 경로가 일치해. Blocking Delegation, `request_arch_review`, `archReview`/`latestUserRequirements` 구조적 분리, `tool_deliveries`, 종료 순서, Arch 타임아웃 120초(범위 30~600), 단일 worker, DB 스키마·`user_version=6`, 실행 파일 이름 `esh-chat-mvp4` 모두 그대로야. Tauri 명령·프런트·마이그레이션 변경은 없어.
+- 검증 (실제 출력):
+  - **red 먼저**: 테스트만 추가하고 돌린 결과 `test result: FAILED. 89 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.47s`, 실패 본문은 `assertion left == right failed / left: ("unknown", "실행 연결이 설정되지 않았습니다") / right: ("idle", "대기 중")`. 즉 결함이 실제로 존재함을 먼저 관측했어.
+  - 수정 후 `cargo test --bin esh-chat-mvp4` → `test result: ok. 90 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.41s` (기존 89 → 90, 순증 1). 신규 테스트 `ok`. Rust 경고는 기존 2건(`agents.rs`의 `Authenticated`·`Required`·`Error`, `Ready` 미생성 variant)뿐이고 새 경고는 없어.
+  - `node scripts/verify_external_threads.mjs` → `{"passed":true,"recordedRows":27,"scratchRowsHidden":9,"normalConversationsPreserved":true}`
+  - `npm run build` (`tsc -b && vite build`) → `✓ 298 modules transformed`, `✓ built in 3.87s` (`dist/assets/index-CXzmrCQ4.js` 433.84 kB, `index-YBSTmYxd.css` 52.24 kB, `guiProbe-Ec5GCOO9.js` 45.64 kB). **세 해시 모두 이전 회차와 동일** — Rust만 바꿨으므로 맞아. Tailwind 후보 오염도 없어.
+- 중간 실패 1건(환경, 코드 아님): 첫 `npm run build`가 `[safe-delete] 操作失败: spawnSync ...genie-trash\win32-x64.exe ETIMEDOUT` at `emptyDir`/`prepareOutDir`로 죽었어(exit 0으로 보이지만 빌드 실패). 지난 회차에 기록한 함정 그대로야. `dist`가 junction이 아니라 이 worktree의 실제 디렉터리임을 `dir /AL`로 확인한 뒤 `rm -rf dist` 후 재실행해 위 성공 결과를 얻었어.
+- 이 검증의 경계(중요):
+  - **이번 결함은 현재 등록 경로에서 관측된 사용자 피해가 아니야.** 등록은 `agent_instances` 행·`agents` 행·revision을 한 트랜잭션으로 쓰므로(`registry.rs:218-236`), 지금 빌드로 등록한 인스턴스는 행이 비어 있을 수 없어. 백필이 잘못된 값을 쓰는 조건은 "행이 다른 이유로 사라진 경우"(구빌드가 남긴 등록, 수동 삭제, 앞으로 생길 정리 버그)야. 즉 이번 수정은 **방어적 정합성**이고, 재현 테스트는 그 조건을 인위적으로 만들어 검사한 것이야.
+  - 실제 `claude -p`, `python scripts/verify_*.py`, WebView, 데스크톱 빌드는 실행하지 않았어.
+  - 신규 테스트는 `Store::open`을 두 번 호출해 백필 결과만 단언해. 백필이 도는 시점의 동시성이나 `snapshot` 소비자 쪽 표시는 검사하지 않았어.
+- 남은 문제:
+  1. **승인 대기(변동 없음)**: 실제 `claude -p` 1회로 stream-json 원문 캡처(외부 데이터 전송 + 계정 사용량). 이때까지 `parse_events`는 공개 문서 기준이야.
+  2. **ARCHITECTURE.md 23·41행 정정은 여전히 열려 있어**(이번에도 범위를 코드로 한정). 23행은 `agents.rs`를 "Codex Lead/Antigravity Reviewer 어댑터"로만 적어 OpenCode·Claude 어댑터가 빠졌고(실제 `registered()`는 4개: `agents.rs:177`), 41행 "실행 상태는 기존 앱 전역 `agents` 2개 행을 유지"는 등록마다 상태 행을 만드는 7회차 변경 이후 부정확해(실제로는 내장 2행 + 등록 수만큼, `registry.rs:221-233`).
+  3. `store.rs`의 백필 SQL과 `registry.rs`의 등록 분기가 **여전히 두 곳에 따로 적혀 있어**(하나는 SQL `CASE`, 하나는 Rust `if`). 이번에 술어를 같게 맞췄지만 한 곳으로 합치지는 않았어 — 새 연결 종류가 생기면 다시 갈릴 수 있어.
+  4. 화면 검증 공백 — WebView2 초기화 실패로 실제 화면에서 확인할 수단이 없어.
+  5. 1단계 잔여 4건(GUI 실행 확인, `tauri-plugin-single-instance` 내부 경합, 원본 세션 전역 잠금=승인 대기, 종료 중 거절의 WebView 재현)은 그대로 차단 상태야.
+- 다음 작업: (1) `docs/ARCHITECTURE.md` 23·41행 두 줄 정정 — 이제 다섯 회차째 미룬 항목이라 다음 회차에 먼저 처리할 것. 또는 (2) 승인 시 실제 `claude -p` 캡처로 `parse_events` 확정. 승인이 계속 없으면 (3) 백필 판정을 `registry`의 한 함수로 합쳐 두 경로가 구조적으로 갈릴 수 없게 만드는 무동작 변경. 4단계(세션별 Lead/Reviewer 선택)는 3단계의 실제 CLI 근거가 생긴 뒤로.
+- 실행 메모(이 환경): Rust 테스트는 `mvp-app/src-tauri/`에서 `.tools/cargo/bin/cargo.exe`에 `CARGO_HOME`/`RUSTUP_HOME`/`PATH`를 `.tools`로 맞춰 `run_in_background` + 로그로 돌릴 것(증분이라 7~12초). `mvp-app/node_modules`와 `mvp-app/evidence`는 **메인 저장소(`D:/프로젝트/ESH/mvp-app/...`)로 향하는 junction**이야 — 증거를 `evidence/`에 쓰면 메인 저장소 쪽에 쌓이고, `dist`만 이 worktree의 실제 디렉터리야.
+
 ## ARCHITECTURE.md의 Claude 연결 서술 두 줄을 코드 사실로 정정 (2026-10-26, 1단계 문서 정합성)
 
 - 선택한 작업: 19~22회차가 "다음 작업"으로 네 번 미뤄 둔 `docs/ARCHITECTURE.md` 35행·99행 정정. 3단계 등록 조각(`9844058`)과 화면 배선 조각(`9d4b238`) 이후 두 문장이 사실과 달라져 있었어("Claude Code와 Gemini CLI는 등록 후보이며 실행 연결은 아직 미지원", "나머지 신규 인스턴스는 `not_configured`/`unsupported`"). 코드 변경 없이 **문서만** 고쳤어 — 요청 범위를 넘겨 리팩터링·기능 추가로 확대하지 않았어.
