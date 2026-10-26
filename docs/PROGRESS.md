@@ -1,5 +1,32 @@
 # ESH 진행 상태와 개발 인계
 
+## 화면의 메시지 대상과 Lead UI를 세션 provider에서 정함 (2026-10-26, 3단계 일곱 번째 조각)
+
+- 선택한 작업: 3단계(추가 CLI 어댑터)의 다음 조각으로 지난 회차가 남긴 (d) "화면 배선". 그때까지 `main.tsx`는 전송 대상을 `isOpenCode ? 'opencode' : 'codex'`로 정해서 **Claude Code 세션은 `target='codex'`로 보내져 `turn_route`가 거절**했고, 세션 생성 드롭다운은 `provider === 'opencode'`만 나열해 화면에서 Claude Lead를 고를 수 없었고, `main` 메시지 필터에 `claude_code`가 없어 답변이 와도 목록에 뜨지 않았어.
+- 변경 파일 4개(그중 1개는 신규 검증 스크립트): `mvp-app/src/providers.ts`(신규), `mvp-app/src/main.tsx`, `mvp-app/src/types.ts`, `mvp-app/scripts/verify_providers.mjs`(신규).
+  - `providers.ts`: provider 판정을 한 곳에 모았어. `turnTarget(provider)`는 `codex`/`opencode`/`claude_code`만 대상 문자열을 돌려주고 **그 밖은 `null`**이야 — 예전처럼 `codex`로 추측하지 않아. `isCliLeadProvider`(세션을 만들 수 있는 CLI Lead), `supportsManualCompaction`·`supportsCodexModelSettings`(Codex 전용 조작), `providerLabel`(표시 이름).
+  - `main.tsx`: `send`가 `turnTarget(provider)`를 쓰고 `null`이면 요청을 보내지 않고 오류 배너로 알려. 세션 생성 드롭다운은 `activeRole === 'lead' && installation === 'installed' && isCliLeadProvider(provider)`로 모든 CLI Lead를 나열하고 라벨은 `providerLabel`로 만들어. `main` 대화 필터·답변 구분선·말풍선 제목·빈 화면 문구·`aria-label`/`placeholder`가 provider를 따라가고, 모델 선택·추론 강도·`ContextStatus`(수동 압축)는 `supportsCodexModelSettings`/`supportsManualCompaction`로 **Codex 세션에만** 붙어. OpenCode 모델 선택 UI는 그대로야.
+  - `types.ts`: `Message.speaker`와 `Session.provider` 유니온에 `'claude_code'` 추가(백엔드는 이미 그 값을 저장하고 있었어).
+- 동작 보존: Codex 세션은 `target='codex'`, OpenCode 세션은 `target='opencode'`로 이전과 같고, 두 provider의 모델·압축 UI도 이전과 같은 자리에 붙어. 바뀐 것은 (1) `claude_code` 세션이 자기 target으로 보내지고 답변이 대화 목록에 표시된다는 것, (2) 드롭다운에 Claude Lead가 나온다는 것, (3) **분기가 없는 provider(`gemini_cli`·`mock_agent` 등) 세션이면 전송을 시도하지 않고 화면에서 먼저 거절**한다는 것(백엔드도 같은 요청을 거절하므로 살아 있는 동작 차이는 없어). Blocking Delegation, `request_arch_review`, `archReview`/`latestUserRequirements` 구조적 분리, `tool_deliveries`, 종료 순서, Arch 타임아웃 120초(범위 30~600), 단일 worker, DB 스키마·`user_version=6`, 실행 파일 이름 `esh-chat-mvp4` 모두 그대로야. Rust·Tauri 명령·DB 쓰기는 한 줄도 바꾸지 않았어.
+- 검증 (실제 출력):
+  - `node scripts/verify_providers.mjs` → `{"passed":true,"targets":3,"refusedTargets":6,"codexOnlyControls":2,"wiredCallSites":5}` (신규). `providers.ts`를 `typescript`로 트랜스파일해 직접 호출하고, `main.tsx`·`types.ts` 소스를 정적으로 검사해 하드코딩 분기가 되살아나지 않게 막아.
+  - `node scripts/verify_external_threads.mjs` → `{"passed":true,"recordedRows":27,"scratchRowsHidden":9,"normalConversationsPreserved":true}` (프런트 변경이 이 분류에 영향 없음 확인)
+  - `npm run build` (`tsc -b && vite build`) → `✓ 298 modules transformed`, `✓ built in 9.61s` (`dist/assets/index-CXzmrCQ4.js` 433.84 kB, `index-YBSTmYxd.css` 52.24 kB, `guiProbe-Ec5GCOO9.js` 45.64 kB). **CSS 해시는 이전과 동일**하고 JS만 바뀐 것이 이번 변경의 범위와 맞아.
+  - `cargo test --bin esh-chat-mvp4` → `test result: ok. 88 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.53s` (Rust는 손대지 않아 기준선 유지 확인, 88 그대로). 경고는 기존 2건(`agents.rs`의 `Authenticated`·`Required`·`Error`, `Ready` 미생성 variant)뿐.
+- **중간 발견 1건(정직하게 기록)**: 첫 `npm run build`에서 CSS가 `index-hNmQT7Zy.css` 53.44 kB로 **1.2 kB 늘었어**(CSS는 건드리지 않았는데). 원인은 Tailwind v4 스캐너가 새 검증 스크립트 안의 주석·메시지에 있던 낱말 `filter`를 유틸리티 후보로 읽어 `.filter{…}` 규칙을 생성한 것이야. 변경을 stash하고 같은 트리로 다시 빌드해 기준선이 52.24 kB(`index-YBSTmYxd.css`)임을 확인한 뒤 스크립트 문구를 `narrow`로 바꿨고, CSS 해시가 기준선으로 돌아왔어. **교훈: `mvp-app/` 안에 두는 스크립트·주석의 낱말도 Tailwind 후보로 잡혀 CSS 번들이 변한다.** 검증 스크립트를 추가할 때 CSS 해시가 바뀌면 먼저 이 원인을 의심할 것.
+- 이 검증의 경계(중요):
+  - **실제 화면을 보지 못했어.** 이 환경은 WebView2 초기화가 실패해(8회차 기록) GUI probe를 돌릴 수 없어. 이번 검증은 (1) 순수 함수 단언, (2) 소스 정적 검사, (3) `tsc -b` 타입 검사, (4) `vite build` 성공까지야. "드롭다운에 Claude가 보인다", "전송이 `claude_code`로 나간다", "답변이 목록에 뜬다"는 **화면에서 관측한 것이 아니야**. `python scripts/verify_*.py`도 실행하지 않았어(실행 중인 앱·실제 CLI 사용량).
+  - `npm run build`는 프런트만 빌드해. 데스크톱 exe(`build:desktop`)는 다시 빌드하지 않았어 — 지금 `dist`가 최신이므로 다음 데스크톱 빌드에 포함될 뿐이야.
+  - **이번 조각으로 Claude 세션 경로가 처음 화면에서 도달 가능해졌어.** 계약 위치(`~/.local/bin/claude.exe`)에 Lead로 등록되어 있으면 세션을 만들고 메시지를 보낼 수 있어. 그런데 `parse_events`는 여전히 실제 `claude -p`로 확인되지 않은 **공개 문서 기준**이라, 그 상태로 보내면 턴이 실패하거나 빈 답이 될 수 있어(도구 호출·세션 ID 불일치는 거절하도록 되어 있고 stderr 본문은 전달하지 않아). 실제 CLI 캡처는 여전히 **승인 대기**야.
+- 남은 문제:
+  1. **승인 대기**: 실제 `claude -p` 1회로 stream-json 원문 캡처(외부 데이터 전송 + 계정 사용량). 이때까지 파서·턴 형태는 미확정이고, 이제는 화면에서도 그 경로를 호출할 수 있어 우선순위가 더 높아졌어.
+  2. **문서 불일치(계속 열림)**: `docs/ARCHITECTURE.md` 35행("Claude Code와 Gemini CLI는 … 실행 연결은 아직 미지원")과 99행("나머지 신규 인스턴스는 `not_configured`/`unsupported`")이 등록 조각(9844058)과 이번 조각으로 사실과 달라졌어. 이번에도 PROGRESS 기록만 하고 ARCHITECTURE는 건드리지 않았어(요청 범위 밖 문서 확장 금지). 다음 회차에 두 줄만 정정하면 정리돼.
+  3. **화면 검증 공백**: provider 배선을 실제 WebView에서 확인할 수단이 없어. `guiProbe.ts`에 provider 점검 모드를 추가하면 사용자가 한 번 실행해 확인할 수 있지만, 그 모드가 실제 턴을 보내면 CLI 사용량이 발생해 승인 문제가 따라.
+  4. Claude 세션에는 모델·추론 강도·수동 압축 UI가 없어(어댑터가 `model_catalog`·`context_compaction`을 광고하지 않아 의도된 것). `claude_turn`은 `session.model`을 그대로 넘기므로 DB에 값이 있으면 `--model`로 전달돼 — 화면에서 설정할 방법은 없어.
+  5. 1단계 잔여 4건(GUI 실행 확인, `tauri-plugin-single-instance` 내부 경합, 원본 세션 전역 잠금=승인 대기, 종료 중 거절의 WebView 재현)은 그대로 차단 상태야.
+- 다음 작업: (1) `docs/ARCHITECTURE.md` 35·99행 두 줄 정정(이번 조각이 만든 불일치 마무리), 또는 (2) 승인 시 실제 `claude -p` 캡처로 `parse_events` 확정. 승인이 계속 없으면 (3) `guiProbe.ts`에 provider 배선 점검 모드(턴 전송 없이 드롭다운·target 계산만 확인)를 넣어 사용자가 WebView에서 1회 실행하는 쪽이 안전해. 4단계(세션별 Lead/Reviewer 선택)는 3단계의 실제 CLI 근거가 생긴 뒤로 미루는 편이 좋아.
+- 실행 메모(이 환경): `npm run build`는 Bash에서 그대로 돌아가(9~11초). Rust 테스트는 `mvp-app/src-tauri/`에서 `.tools/cargo/bin/cargo.exe`에 `CARGO_HOME`/`RUSTUP_HOME`/`PATH`를 `.tools`로 맞춰 `run_in_background` + 로그 파일로 돌릴 것. Node 검증 스크립트는 `mvp-app/node_modules`의 `typescript`를 쓰므로 `mvp-app/`에서 실행해야 해.
+
 ## Claude Code 연결을 등록에 부여하고 턴 해석을 `active_role`로 좁힘 (2026-10-26, 3단계 여섯 번째 조각)
 
 - 선택한 작업: 3단계(추가 CLI 어댑터)의 다음 조각으로 지난 회차가 남긴 (c) "`agents.rs`+`registry.rs` 등록 조각". 그때까지 `register_agent_instance`는 OpenCode npm shim만 `connection_kind`를 부여하고 나머지는 `not_configured`로 두었고, `ClaudeCodeAdapter`가 없어 `claude_runner`가 `role`을 봐야 했다. 이번에 등록이 Claude Code 연결을 받고, 어댑터가 그 연결을 광고하며, 턴 해석이 `role` 대신 `active_role`을 보도록 **한 조각에서** 맞췄어.
