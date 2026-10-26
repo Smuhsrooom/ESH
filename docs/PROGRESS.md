@@ -1,5 +1,36 @@
 # ESH 진행 상태와 개발 인계
 
+## ARCHITECTURE.md의 어댑터 수와 상태 행 수 서술을 코드 사실로 정정 (2026-10-26, 문서 정합성)
+
+- 선택한 작업: 19~24회차가 "다음 작업" 1순위로 **다섯 번 미뤄 둔** `docs/ARCHITECTURE.md` 23행·41행 정정. 이번에는 미루지 않고 먼저 처리했어. 코드 변경 없이 **문서 두 줄만** 치환했고, 등록 조각(`9844058`)·화면 배선(`9d4b238`)·상태 행 백필(`7b0f164`) 이후 사실과 달라진 문장을 코드에 맞췄어. 요청 범위를 넘긴 리팩터링·기능 추가·문서 확장은 하지 않았어.
+- 변경 파일: `docs/ARCHITECTURE.md` 1개(2줄 치환). `git diff --stat` → `1 file changed, 2 insertions(+), 2 deletions(-)`.
+  - 23행: "Codex Lead/Antigravity Reviewer 어댑터, …" → "어댑터 4개(Codex·OpenCode·Claude Code Lead, Antigravity Reviewer), …". 이전 문장은 `registered()`가 4개를 반환하는 사실과 달라 OpenCode·Claude Code가 문서에서 사라져 있었어.
+  - 41행: "실행 상태는 기존 앱 전역 `agents` 2개 행을 유지하며 …" → "실행 상태는 앱 전역 `agents` 행으로 유지해 — 내장 Codex·Antigravity 2개에 더해 등록한 인스턴스마다 상태 행이 하나씩 생기고, 세션별 상태 이력 테이블은 없어." 7회차(등록마다 상태 행 생성) 이후 "2개 행"은 거짓이야. "세션별 상태 이력 테이블은 없어"는 지금도 사실이라 유지했어.
+- 정정 근거(코드에서 직접 확인한 줄, 문서 주장 ↔ 소스 대응):
+  - `src-tauri/src/agents.rs:177` `pub fn registered() -> [&'static dyn AgentAdapter; 4] { [&CODEX, &ANTIGRAVITY, &OPENCODE, &CLAUDE] }` → 어댑터는 4개. `:13` `ConnectionKind::ClaudeCodeCli`, `:205` `ClaudeCodeAdapter` descriptor(id `claude_code`)가 실제로 존재.
+  - `src-tauri/src/registry.rs:218-236` `register_agent_instance`가 `agent_instances` INSERT와 `agents` INSERT OR IGNORE를 **같은 트랜잭션**에서 수행(`INSERT OR IGNORE INTO agents(id,status,detail,updated_at)`) → 등록마다 상태 행 1개. `store.rs:148-157` 백필도 같은 규칙.
+  - `src/AgentsView.tsx:81` 목록이 `snapshot.agents.filter(id === 'codex' || id === 'antigravity')` + `registered.map(...)`로 그려지고, `src/main.tsx:256` 배지가 `snapshot.agents.length` → 행 수가 등록 수만큼 늘어난다는 서술과 일치.
+- 동작 보존: 코드·스키마·Tauri 명령·프런트를 한 줄도 바꾸지 않았어. Blocking Delegation, `request_arch_review`, `archReview`/`latestUserRequirements` 구조적 분리, `tool_deliveries`, 종료 순서, Arch 타임아웃 120초(범위 30~600), 단일 worker, DB 스키마·`user_version=6`, 실행 파일 이름 `esh-chat-mvp4` 모두 그대로야.
+- 검증 (실제 출력):
+  - `git diff --stat` → `docs/ARCHITECTURE.md | 4 ++--`, `1 file changed, 2 insertions(+), 2 deletions(-)`. 변경 파일이 문서 1개뿐임을 확인(코드 무변경).
+  - `cargo test --bin esh-chat-mvp4` (`mvp-app/src-tauri/`에서 `.tools`의 cargo 직접 실행) → `test result: ok. 90 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.98s`. 직전 회차(90 passed, 1.41s)와 동일 — 코드를 바꾸지 않았으므로 기준선 유지 확인이야. 경고는 기존 2건(`agents.rs`의 `Authenticated`·`Required`·`Error`, `Ready` 미생성 variant)뿐이고 새 경고는 없어. 로그 `mvp-app/evidence/ct-r25.log`(gitignore 대상).
+  - `node scripts/verify_external_threads.mjs` → `{"passed":true,"recordedRows":27,"scratchRowsHidden":9,"normalConversationsPreserved":true}`
+  - `npm run build` (`tsc -b && vite build`) → `✓ 298 modules transformed`, `✓ built in 4.82s` (`dist/assets/index-CXzmrCQ4.js` 433.84 kB, `index-YBSTmYxd.css` 52.24 kB, `guiProbe-Ec5GCOO9.js` 45.64 kB). **세 해시 모두 직전 회차와 동일** — 문서만 바꿨으므로 맞아. Tailwind 후보 오염도 없어(CSS 52.24 kB 그대로).
+  - `npm run build` 전에 `dist`를 먼저 지웠어(지난 회차의 `[safe-delete] … ETIMEDOUT` 함정을 겪지 않으려고). 이번엔 그 오류가 나오지 않았어.
+- 이 검증의 경계(중요):
+  - 이번 변경은 **문서 서술 정정**이라 실행 동작의 변화가 없고, 위 세 검사는 "문서만 바꿨으니 코드 기준선이 그대로다"를 확인한 것이야. **문서 정확성 자체를 자동 검증한 것은 아니야** — 근거는 위 `파일:줄` 대조야.
+  - 실제 `claude -p`, `python scripts/verify_*.py`, WebView, 데스크톱 빌드는 실행하지 않았어.
+  - 41행의 "등록한 인스턴스마다 상태 행이 하나씩"은 등록·백필 두 경로의 코드로 확인했고, 화면에서 행 개수를 세어 본 것은 아니야(WebView2 초기화 실패로 화면 관측 수단 없음).
+- 남은 문제:
+  1. **승인 대기(변동 없음)**: 실제 `claude -p` 1회로 stream-json 원문 캡처(외부 데이터 전송 + 계정 사용량). 이때까지 `parse_events`는 공개 문서 기준이야.
+  2. **새로 확인한 문서 불일치 1곳(이번엔 범위 유지로 남김)**: 99행 "`AgentAdapter`는 고정된 `codex`/`antigravity` ID, 연결 방식, 역할, 지원 capability를 분리해 제공해"도 어댑터가 4개인 지금은 불완전해. 같은 문단 뒤쪽이 OpenCode·Claude 등록을 설명하므로 문장 자체가 거짓은 아니지만 "고정된 codex/antigravity ID"로 읽히는 여지가 있어 다음 회차에 한 줄로 정리하면 좋아.
+  3. `store.rs`의 백필 SQL과 `registry.rs`의 등록 분기가 **여전히 두 곳에 따로** 있어(하나는 SQL `CASE`, 하나는 Rust `if`). 24회차에 술어를 같게 맞췄지만 한 함수로 합치지는 않았어 — 새 연결 종류가 생기면 다시 갈릴 수 있어.
+  4. `create_lead_session`이 `add_session`과 별도 INSERT 문을 가져 컬럼 목록이 중복이야(22회차 기록). `chat_sessions`에 컬럼이 추가되면 두 곳을 같이 고쳐야 해.
+  5. 화면 검증 공백 — WebView2 초기화 실패로 실제 화면에서 확인할 수단이 없어.
+  6. 1단계 잔여 4건(GUI 실행 확인, `tauri-plugin-single-instance` 내부 경합, 원본 세션 전역 잠금=승인 대기, 종료 중 거절의 WebView 재현)은 그대로 차단 상태야.
+- 다음 작업: (1) 승인 시 실제 `claude -p` 캡처로 `parse_events` 확정 — 3단계의 남은 근거를 닫는 유일한 길이야. 승인이 계속 없으면 (2) 99행 한 줄 정리 + `store.rs`/`registry.rs`의 상태 행 판정을 `registry`의 한 함수로 합치는 무동작 변경, 또는 (3) `create_lead_session`의 중복 INSERT를 공통 헬퍼로 합치는 무동작 변경. 4단계(세션별 Lead/Reviewer 선택)는 3단계의 실제 CLI 근거가 생긴 뒤로.
+- 실행 메모(이 환경): Rust 테스트는 `mvp-app/src-tauri/`에서 `.tools/cargo/bin/cargo.exe`에 `CARGO_HOME`/`RUSTUP_HOME`/`PATH`를 `.tools`로 맞춰 `run_in_background` + 로그로 돌릴 것(증분이라 2초 내 실행). `npm run build` 전에는 `rm -rf dist`로 비우면 `[safe-delete]` 함정을 피할 수 있어. `mvp-app/node_modules`·`mvp-app/evidence`는 메인 저장소로 향하는 junction이야.
+
 ## 상태 행 백필이 등록이 획득한 연결을 그대로 쓰게 함 (2026-10-26, 3단계 안정화)
 
 - 선택한 작업: 지난 회차가 "다음 작업" 1순위로 남긴 `docs/ARCHITECTURE.md` 23·41행 정정 대신, 같은 조각(20회차 Claude 등록)이 남긴 **실제 코드 불일치**를 먼저 고쳤어. 근거는 이번에 코드를 대조하다 확인한 것 — `Store::open`의 상태 행 백필(`store.rs:148`)은 `connection_kind='opencode_cli_json'`만 `idle`로 판정하는데, 등록 경로(`registry.rs:225`)는 `connection_kind != 'not_configured'`면 `idle`이야. 그래서 **계약 위치(`~/.local/bin/claude.exe`)에 Lead로 등록해 `claude_code_cli`를 획득한 인스턴스**의 `agents` 행이 어떤 이유로 없으면, 재시작 후 백필이 그 행을 `unknown`/`실행 연결이 설정되지 않았습니다`로 되살려. 20회차에 `AgentsView`에서 없앤 것과 같은 종류의 거짓 표기("지원되는데 설정 필요")가 DB 계층에 남아 있던 셈이야.
