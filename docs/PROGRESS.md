@@ -1,5 +1,22 @@
 # ESH 진행 상태와 개발 인계
 
+## GUI 검사의 WebView2 프로필 분리 내장과 Claude 실패 메시지 개선 (2026-10-27)
+
+### 1. GUI 검사 스크립트가 WebView2 프로필을 스스로 분리
+- 변경: `scripts/verify_live.py`의 `launch`와 `scripts/verify_window_state.py`의 `launch`가 `WEBVIEW2_USER_DATA_FOLDER`를 해당 실행의 데이터 폴더로 지정해. WebView2는 지정 폴더 안에 `EBWebView`를 만들어서, 앱 기본 배치(`%LOCALAPPDATA%\local.esh.conversation\EBWebView`가 `chat.sqlite` 옆에 있음)와 같은 구조가 돼. 다른 검사 스크립트는 모두 `verify_live.launch`를 거쳐. 앱 코드는 바꾸지 않았어.
+  - 첫 시도는 `<데이터 폴더>/EBWebView`를 지정해 `EBWebView/EBWebView`로 한 겹 더 생겼어. 검사는 모두 통과했지만 배치가 기본과 달라 데이터 폴더를 지정하도록 고쳤어. 첫 실행 기록은 `mvp-app/evidence/webview-isolation-20261027/first-run-nested-layout/`에 보존했어.
+- 검증: 호출 쪽 환경 변수 없이 AI를 쓰지 않는 GUI 검사 6개(registry, agents, theme, markdown, restore, window_state)가 모두 통과했어. 사용자 실제 프로필 지문(파일 328개의 경로·크기·수정 시각 SHA-256)은 전후 같고, 데이터 폴더마다 자기 `EBWebView`가 생겼어. 근거 `mvp-app/evidence/webview-isolation-20261027/result.json`. 최종 exe로 돌린 `verify_live.py`도 통과했어(실제 Codex→Arch 2회 검토, 같은 thread/turn, 호출당 wire 응답 1회, `confirmed`, 재시작 복원, 연결 오류 표시). 근거 `mvp-app/evidence/panels-20261027-130330/result.json`. 이 실행 뒤에도 실제 프로필은 그대로야.
+- 한계: 프로필 하나가 약 9MB라 `evidence/`(gitignore 대상)가 실행마다 커져. 나머지 AI 사용 검사(workspace·cancel·compact·stream·context·models·import_ui)는 이 변경 뒤 다시 돌리지 않았어. 오늘 앞서 같은 방식(호출 쪽에서 분리 폴더 지정)으로 통과한 기록이 있어. `.workbuddy-ai/memory/MEMORY.md`의 "AI는 GUI를 띄우지 않는다" 규칙은 바꾸지 않았고 사용자 결정 대기야.
+
+### 2. Claude Code 실패가 원인 대신 종료 코드·시간 초과로만 보이던 문제
+- 실제 캡처(`evidence/claude-capture-20261027`)에서 CLI는 API 실패 때 종료 코드 1과 함께 stdout에 `is_error` 결과(`API Error: Connection refused …`)를 남겨. 그런데 `collect`는 종료 코드가 0이 아니면 stdout을 읽지 않고 "종료 코드 Some(1)로 실패"만 반환했어. 오늘 앞서 추가한 fixture 테스트는 `parse_events`를 직접 불러서, 실제 실행 경로가 그 함수에 닿지 않는다는 점을 놓쳤어.
+- 변경(`src-tauri/src/claude.rs`):
+  - 종료 코드가 0이 아니고 stdout에 `is_error` 결과가 있으면 `Claude 실행 오류: <결과 문구>`를 반환해. 결과가 없으면 기존처럼 종료 코드 메시지를 보여. stderr는 계속 노출하지 않아. 종료 코드 표기도 `Some(1)` 대신 `1`로 고쳤어.
+  - 시간 초과 때 프로세스 트리를 끝낸 뒤 그때까지의 stdout을 최대 2초 기다려 읽어. `system/api_retry`가 있으면 재시도 횟수와 마지막 HTTP 상태(없으면 "응답을 받지 못해")를 메시지에 넣어. 실제 CLI가 재시도에 쓴 시간(턴 1 181.6초, 턴 2 180.0초)이 ESH 턴 제한 180초와 거의 같아서, 이전에는 원인 없이 "응답 시간 초과"만 보였을 가능성이 커.
+- 테스트 3개 추가: 실제 실패 스트림 단위 검사, 실제 stdout 바이트를 그대로 내보내고 종료 코드 1로 끝나는 stub(stderr 비밀 문자열 미노출 포함), 재시도 이벤트 2개를 낸 뒤 6초 제한을 넘기는 stub 두 개(상태 없음·HTTP 529).
+- 검증 (실제 출력): `npm test` → `94 passed; 0 failed`. `npm run build:desktop` 통과(같은 `esh-chat-mvp4.exe`, 13:03). exe 안에 새 메시지와 OpenCode deny 설정 문자열이 함께 들어 있어. `verify_external_threads.mjs`, `verify_providers.mjs` 통과.
+- 미검증: ESH 앱 화면에서의 Claude 턴(Claude용 GUI probe 모드가 없어). 실제로 180초 근처에서 CLI 종료와 ESH 제한 시간 중 무엇이 먼저 오는지는 실행마다 달라질 수 있고, 두 경로 모두 stub으로만 확인했어. Claude 정상 답변 스트림은 여전히 미캡처야.
+
 ## 실제 `claude -p` 캡처 시도와 병합 후 전체 GUI 회귀 (2026-10-27)
 
 ### Claude Code 실제 CLI

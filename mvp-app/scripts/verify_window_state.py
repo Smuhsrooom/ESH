@@ -46,6 +46,10 @@ def window_for(pid):
 def launch():
     env = os.environ.copy()
     env['ESH_DATA_DIR'] = str(RUN / 'data')
+    # Same isolation as verify_live.launch: a throwaway WebView2 profile per run,
+    # created by WebView2 as <data dir>/EBWebView like the app's default layout.
+    (RUN / 'data').mkdir(parents=True, exist_ok=True)
+    env['WEBVIEW2_USER_DATA_FOLDER'] = str(RUN / 'data')
     env.pop('ESH_GUI_PROBE', None)
     process = subprocess.Popen([str(EXE)], env=env)
     deadline = time.monotonic() + 20

@@ -16,11 +16,15 @@
 //! - The flags and values in `command_args` are checked against the help text
 //!   the installed CLI printed on this machine, committed verbatim as
 //!   `fixtures/claude-cli-2.1.304-help.txt` (captured 2026-10-25).
-//! - The event classification is written from the public headless/SDK docs and
-//!   has **not** been confirmed against a real `claude -p` stream on this
-//!   machine. A real run sends a prompt to an external API, so it needs
-//!   approval first; until then this parser is unverified protocol shape, not a
-//!   working connection.
+//! - A real `claude -p` run (2026-10-27, approved) could not reach the API: the
+//!   user's `ANTHROPIC_BASE_URL` pointed at a local port with no server. Its
+//!   failure stream is kept as `fixtures/claude-cli-2.1.304-api-error-stream.jsonl`
+//!   (init trimmed of local paths, other lines verbatim): about 180 s of
+//!   `system/api_retry` events, then an `is_error` result, then exit code 1. The
+//!   failure and timeout messages below are built on that capture.
+//! - The success-path classification is still written from the public
+//!   headless/SDK docs and has **not** been confirmed against a real successful
+//!   stream on this machine.
 //! - `run` is exercised by tests against a stub child process, which proves the
 //!   process plumbing (capture, exit code, cancel, timeout) but not the real CLI.
 #![allow(dead_code)]
@@ -144,7 +148,14 @@ async fn collect(
             Ok(value) => value.map_err(err)?,
             Err(_) => {
                 cli::stop_tree(&mut child).await?;
-                return Err("Claude Code 응답 시간 초과".into());
+                // Killing the tree closes stdout, so whatever the CLI printed while
+                // it was still retrying the API stays readable. The short wait keeps
+                // a pipe held open elsewhere from hanging the turn.
+                let captured = match timeout(Duration::from_secs(2), out).await {
+                    Ok(Ok(Ok(bytes))) => Some(bytes),
+                    _ => None,
+                };
+                return Err(timeout_message(captured.as_deref()));
             }
         },
     };
@@ -154,12 +165,62 @@ async fn collect(
         return Err("Claude Code 출력 크기 제한을 초과했습니다".into());
     }
     if !status.success() {
-        return Err(format!(
-            "Claude Code가 종료 코드 {:?}로 실패했습니다. CLI 로그를 확인해 주세요",
-            status.code()
-        ));
+        // A failed request still ends with a stream-json error result on stdout,
+        // and that public text explains the failure better than the exit code.
+        if let Some(reason) = error_result(&output) {
+            return Err(format!("Claude 실행 오류: {reason}"));
+        }
+        let code = status.code().map(|code| code.to_string()).unwrap_or_else(|| "알 수 없음".into());
+        return Err(format!("Claude Code가 종료 코드 {code}로 실패했습니다. CLI 로그를 확인해 주세요"));
     }
     parse_events(&output, expected)
+}
+
+/// The CLI's own error result, if the stream carries one. The text comes from
+/// the `result` field on stdout, the same field `parse_events` shows for an
+/// error result, never from stderr.
+fn error_result(output: &[u8]) -> Option<String> {
+    let text = std::str::from_utf8(output).ok()?;
+    text.lines().rev().find_map(|line| {
+        let value: Value = serde_json::from_str(line.trim()).ok()?;
+        if value["type"] != "result" || value["is_error"] != true {
+            return None;
+        }
+        let reason = value["result"].as_str().map(str::trim).filter(|reason| !reason.is_empty());
+        Some(reason.unwrap_or("알 수 없는 오류").to_string())
+    })
+}
+
+/// How many `system/api_retry` events the CLI printed and the HTTP status of
+/// the last one (`None` when no HTTP response arrived at all). Only these two
+/// values leave this function; the rest of each event is not shown.
+fn api_retries(output: &[u8]) -> Option<(usize, Option<i64>)> {
+    let mut count = 0;
+    let mut status = None;
+    for line in String::from_utf8_lossy(output).lines() {
+        let Ok(value) = serde_json::from_str::<Value>(line.trim()) else { continue };
+        if value["type"] == "system" && value["subtype"] == "api_retry" {
+            count += 1;
+            status = value["error_status"].as_i64();
+        }
+    }
+    (count > 0).then_some((count, status))
+}
+
+/// The CLI retries a failing API call for about as long as `TURN_TIMEOUT`
+/// (measured 2026-10-27: ten retries, ~180 s), so a plain timeout would hide
+/// that the turn was stuck reconnecting. Name the retries when the output
+/// shows them.
+fn timeout_message(captured: Option<&[u8]>) -> String {
+    match captured.and_then(api_retries) {
+        Some((count, Some(status))) => format!(
+            "Claude Code 응답 시간 초과: Claude API 요청이 HTTP {status}로 실패해 {count}회 재시도하던 중이었습니다"
+        ),
+        Some((count, None)) => format!(
+            "Claude Code 응답 시간 초과: Claude API 응답을 받지 못해 {count}회 재시도하던 중이었습니다. 네트워크·프록시·API 주소 설정을 확인해 주세요"
+        ),
+        None => "Claude Code 응답 시간 초과".into(),
+    }
 }
 
 /// Classify one turn's stream-json output.
@@ -426,6 +487,64 @@ mod tests {
         assert!(message.contains('3'), "{message}");
         // stderr can carry internal context, so it must not reach the caller.
         assert!(!message.contains("secret-context-value"), "{message}");
+    }
+
+    const REAL_FAILURE: &str = include_str!("../fixtures/claude-cli-2.1.304-api-error-stream.jsonl");
+
+    #[test]
+    fn the_real_failure_stream_yields_its_error_text_and_its_retry() {
+        let reason = error_result(REAL_FAILURE.as_bytes()).expect("the captured stream ends with an error result");
+        assert!(reason.starts_with("API Error: Connection refused") && reason.ends_with("(ECONNREFUSED)"), "{reason}");
+        // The captured retry had no HTTP response, so it carries no status.
+        assert_eq!(api_retries(REAL_FAILURE.as_bytes()), Some((1, None)));
+        // A successful stream has no error result and no retries to report.
+        let ok = line(serde_json::json!({"type":"result","is_error":false,"session_id":SESSION,"result":"ok"}));
+        assert_eq!(error_result(ok.as_bytes()), None);
+        assert_eq!(api_retries(ok.as_bytes()), None);
+        assert_eq!(timeout_message(None), "Claude Code 응답 시간 초과");
+        assert_eq!(timeout_message(Some(ok.as_bytes())), "Claude Code 응답 시간 초과");
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_real_failed_exit_reports_the_cli_error_result_instead_of_the_code() {
+        // Replays the captured stdout bytes unchanged and exits 1, as the real CLI did.
+        let fixture = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/claude-cli-2.1.304-api-error-stream.jsonl");
+        let script = format!(
+            "$b=[IO.File]::ReadAllBytes('{fixture}'); $o=[Console]::OpenStandardOutput(); $o.Write($b,0,$b.Length); $o.Flush();\
+             [Console]::Error.WriteLine('secret-context-value'); exit 1"
+        );
+        let (_stop, stopped) = watch::channel(false);
+        let message = collect(stub(&script), None, stopped, Duration::from_secs(60)).await.unwrap_err();
+        assert!(message.starts_with("Claude 실행 오류: API Error: Connection refused"), "{message}");
+        assert!(!message.contains("종료 코드"), "{message}");
+        assert!(!message.contains("secret-context-value"), "{message}");
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_timeout_while_the_cli_retries_names_the_retries() {
+        // Retry events in the shape the real CLI printed, then the CLI keeps
+        // retrying past the deadline.
+        let retry = |attempt: u32, status: &str| {
+            format!(
+                "[Console]::WriteLine('{{\"type\":\"system\",\"subtype\":\"api_retry\",\"attempt\":{attempt},\"max_retries\":10,\"retry_delay_ms\":594,\"error_status\":{status},\"error\":\"unknown\",\"session_id\":\"{SESSION}\"}}');"
+            )
+        };
+        let unreachable = format!("{}{} Start-Sleep -Seconds 30", retry(1, "null"), retry(2, "null"));
+        let overloaded = format!("{}{} Start-Sleep -Seconds 30", retry(1, "null"), retry(2, "529"));
+        let (_first, first) = watch::channel(false);
+        let (_second, second) = watch::channel(false);
+        let limit = Duration::from_secs(6);
+        let (unreachable, overloaded) = tokio::join!(
+            collect(stub(&unreachable), None, first, limit),
+            collect(stub(&overloaded), None, second, limit),
+        );
+        let unreachable = unreachable.unwrap_err();
+        assert!(unreachable.starts_with("Claude Code 응답 시간 초과"), "{unreachable}");
+        assert!(unreachable.contains("응답을 받지 못해 2회"), "{unreachable}");
+        let overloaded = overloaded.unwrap_err();
+        assert!(overloaded.contains("HTTP 529") && overloaded.contains("2회"), "{overloaded}");
     }
 
     #[cfg(windows)]

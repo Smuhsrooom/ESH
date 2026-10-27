@@ -40,6 +40,13 @@ def launch(mode,data_dir,extra=None,label=None):
     for key in ['ESH_CODEX_BIN','ESH_AGY_BIN','ESH_ARCH_TIMEOUT_SECONDS']:
         env.pop(key,None)
     env.update(ESH_DATA_DIR=str(data_dir),ESH_GUI_PROBE=mode)
+    # Each data directory gets its own WebView2 profile. WebView2 creates its
+    # EBWebView folder inside the given folder, so pointing it at the data directory
+    # reproduces the app's default layout (EBWebView next to chat.sqlite). The
+    # timeout kill below can then only damage a throwaway profile, never the
+    # user's, and localStorage UI state follows the DB across a restore launch.
+    data_dir.mkdir(parents=True,exist_ok=True)
+    env['WEBVIEW2_USER_DATA_FOLDER']=str(data_dir)
     if extra: env.update(extra)
     with (RUN/(label+'-stdout.log')).open('w',encoding='utf8') as out, (RUN/(label+'-stderr.log')).open('w',encoding='utf8') as err:
         p=subprocess.Popen([str(EXE)],cwd=APP,env=env,stdout=out,stderr=err)
