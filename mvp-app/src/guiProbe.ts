@@ -504,7 +504,9 @@ export async function runGuiProbe(mode: string) {
       document.querySelector<HTMLButtonElement>('[data-action="unregister-agent"]')!.click();
       await until(() => !document.querySelector('[data-provider="claude_code"]'), 10);
       const after = await invoke<Snapshot>('get_snapshot');
-      if (JSON.stringify(before.messages) !== JSON.stringify(after.messages) || JSON.stringify(before.sessions) !== JSON.stringify(after.sessions) || before.revision !== after.revision) throw new Error('등록이 대화 기록을 변경했어');
+      if (JSON.stringify(before.messages) !== JSON.stringify(after.messages) || JSON.stringify(before.sessions) !== JSON.stringify(after.sessions)) throw new Error('등록이 대화 기록을 변경했어');
+      // Since ca6b9be registration and removal each bump the revision so the WebView accepts the new snapshot.
+      if (after.revision <= before.revision) throw new Error('등록 변경이 snapshot revision을 올리지 않았어');
       registryStatus = { candidates, registeredId: saved[2].id, unsupported: true, duplicateRejected, removed: true, snapshotUnchanged: true };
       document.querySelector<HTMLButtonElement>('[data-action="chat-tab"]')!.click(); await wait(80);
     } else if (mode === 'agents') {

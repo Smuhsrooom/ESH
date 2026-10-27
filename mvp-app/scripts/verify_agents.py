@@ -22,7 +22,7 @@ def main():
         assert normal['agentStatus']['snapshotUnchanged'] and missing['agentStatus']['snapshotUnchanged']
         for name in ['normal', 'missing']:
             db = sqlite3.connect(verify.RUN / (name + '-data') / 'chat.sqlite')
-            assert db.execute('PRAGMA user_version').fetchone()[0] == 5
+            assert db.execute('PRAGMA user_version').fetchone()[0] == 6
             assert db.execute('SELECT COUNT(*) FROM messages').fetchone()[0] == 0
             assert db.execute('SELECT COUNT(*) FROM tool_deliveries').fetchone()[0] == 0
             db.close()

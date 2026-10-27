@@ -39,7 +39,7 @@ def main():
         db=sqlite3.connect(migration/'chat.sqlite')
         for record in records:
             assert db.execute('SELECT sequence,id,speaker,content,created_at FROM messages WHERE id=?',(record[1],)).fetchone()==record
-        assert db.execute('PRAGMA user_version').fetchone()[0]==5;db.close()
+        assert db.execute('PRAGMA user_version').fetchone()[0]==6;db.close()
         assert any(m['kind']=='review_request' for m in probe['rendered'])
         assert any(m['kind']=='review_reply' for m in probe['rendered'])
         result.update(passed=True,finalBuildRestoredMessages=len(restored['rendered']),legacyRecordsPreserved=len(records),panelsReadOnlyAndResize=True)

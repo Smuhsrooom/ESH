@@ -98,6 +98,9 @@ def main():
         assert saved['width'] <= wanted[2] and saved['height'] <= wanted[3]
 
         process, hwnd = launch()
+        # The window is visible at the config default before setup restores the
+        # saved geometry, so wait like the first launch does before measuring.
+        time.sleep(1)
         restored = rect(hwnd)
         assert not USER32.IsZoomed(hwnd) and similar(restored, wanted), (wanted, restored)
         USER32.ShowWindow(hwnd, 3)
@@ -108,6 +111,7 @@ def main():
         assert saved_max['maximized']
 
         process, hwnd = launch()
+        time.sleep(1)
         maximized_after_restart = bool(USER32.IsZoomed(hwnd))
         close(process, hwnd)
         assert maximized_after_restart

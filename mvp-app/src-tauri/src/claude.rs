@@ -319,6 +319,21 @@ mod tests {
     }
 
     #[test]
+    fn a_real_api_error_stream_fails_with_its_result_text_and_keeps_the_resumed_session() {
+        // Captured from a real `claude -p … --resume` turn on 2026-10-27 whose API
+        // connection was refused. The init line is trimmed to drop local paths; the
+        // retry, assistant and result lines are verbatim. This is the failure path
+        // only: a successful real answer has not been captured yet.
+        const STREAM: &str = include_str!("../fixtures/claude-cli-2.1.304-api-error-stream.jsonl");
+        const REAL: &str = "6e71e4ec-e2f3-4fd5-a818-d2599d26e00e";
+        for expected in [None, Some(REAL)] {
+            let message = parse_events(STREAM.as_bytes(), expected).unwrap_err();
+            assert!(message.starts_with("Claude 실행 오류: API Error: Connection refused"), "{message}");
+        }
+        assert!(parse_events(STREAM.as_bytes(), Some(SESSION)).unwrap_err().contains("세션 ID"));
+    }
+
+    #[test]
     fn a_truncated_or_duplicated_stream_is_rejected() {
         let missing_result = line(serde_json::json!({"type":"system","session_id":SESSION}));
         assert!(parse_events(missing_result.as_bytes(), None).is_err());

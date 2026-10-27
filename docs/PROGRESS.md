@@ -1,5 +1,27 @@
 # ESH 진행 상태와 개발 인계
 
+## 실제 `claude -p` 캡처 시도와 병합 후 전체 GUI 회귀 (2026-10-27)
+
+### Claude Code 실제 CLI
+- 사용자 승인 후 `claude.rs::turn_args`와 같은 인수(`-p --output-format stream-json --verbose --permission-mode plan`, 두 번째는 `--resume`)로 설치본 Claude Code 2.1.304를 두 턴 실행했어. 근거: `mvp-app/evidence/claude-capture-20261027/result.json`, `run.ps1`.
+- **두 턴 모두 실패**: API 재시도 10회 후 약 180초에 `API Error: Connection refused … (ECONNREFUSED)`, 종료 코드 1. 원인은 사용자 환경 변수 `ANTHROPIC_BASE_URL`(User 범위)이 `localhost:8088`을 가리키는데 그 포트에 서버가 없기 때문이야. `api.anthropic.com:443` 자체는 연결돼. 환경 변수와 Claude 설정은 바꾸지 않았고, 보호 설정 파일 2개 해시는 전후 같아.
+- 확인된 실제 스트림 구조: `system/init` → `system/api_retry`×10 → `assistant`(`is_api_error_message`) → `result`(`subtype=success`이지만 `is_error=true`). 두 턴의 `session_id`가 같아 `--resume`이 실제로 같은 세션을 이어. 도구 호출은 없었어.
+- 이 실패 스트림을 경로 정보를 지운 `src-tauri/fixtures/claude-cli-2.1.304-api-error-stream.jsonl`로 저장하고 `claude::tests::a_real_api_error_stream_fails_with_its_result_text_and_keeps_the_resumed_session`을 추가했어. `parse_events`가 실제 오류 결과를 `Claude 실행 오류: API Error: Connection refused…`로 실패 처리하고, 다른 세션 ID를 거부하는 것을 확인해.
+- **미확인**: 정상 답변 스트림. 성공 경로의 `parse_events`는 여전히 공개 문서 기준이야. `localhost:8088` 서버를 켜거나 환경 변수를 정리한 뒤 다시 캡처해야 해.
+
+### 병합 후 GUI 회귀 (실제 Tauri WebView)
+- 이 환경에서 WebView2가 초기화되지 않던 문제는 `WEBVIEW2_USER_DATA_FOLDER`를 `mvp-app/evidence/webview-isolated-20261027`로 격리하자 해결됐어. 사용자 실제 프로필(`%LOCALAPPDATA%\local.esh.conversation\EBWebView`, 328개 파일, 최종 수정 10-25 22:25)은 실행 전후 그대로야. 실행 기록: `mvp-app/evidence/gui-suite-20261027/summary.txt`.
+- 검증 스크립트 수정(오래된 기대값):
+  - `verify_agents/compact/context/models/registry/restore.py`가 `user_version == 5`를 기대해 10-25의 v6 마이그레이션 이후 실패할 상태였어. 6으로 고쳤어.
+  - `guiProbe.ts`의 registry 모드는 등록·해제 후 `revision`이 그대로이길 기대했어. `ca6b9be`(10-25) 이후 등록 변경은 revision을 올리는 게 정상 동작이라, 메시지·세션 불변과 revision 증가를 검사하도록 바꿨어. 첫 registry 실행 실패 기록 `registry-20261027-003918`은 보존했어.
+  - `verify_window_state.py`가 재실행 직후 창 크기를 바로 재서 setup의 복원 전 기본 크기(1616×939)를 읽었어. 첫 실행처럼 1초 기다린 뒤 측정하게 고쳤어. 실패 기록 `window-restore-20261027-004348` 보존.
+- 1차 실행 결과: registry, agents, theme, markdown, restore, OpenCode GUI, live, cancel, compact, models, import_ui **통과**. window_state(위 측정 시점 문제), workspace·stream·context **실패**.
+  - workspace·stream·context 세 실패는 모두 같은 형태야: `turn/started`와 `userMessage` 항목 뒤 Codex 이벤트가 180초 동안 없어 `Codex 이벤트 응답 시간 초과`. 계정 한도는 5시간 창 4% 사용으로 여유가 있었어. 실패 기록 `workspace-20261027-004622`, `stream-20261027-005518`, `context-20261027-005733` 보존.
+- 재실행(각 1회): window_state, workspace, stream, context **모두 통과**. 그래서 1차의 Codex 정지는 그 시점의 일시적인 Codex 서비스 응답 지연으로 보고 있어. ESH 코드 결함이라는 근거는 찾지 못했지만, 원인을 확정한 것도 아니야.
+- OpenCode GUI(`opencode-gui-20261027-004350`, 이번 회차 임시 실행기 `evidence/gui-suite-20261027/verify_opencode_gui.py`가 기존 `opencode`/`opencode-restore` probe를 호출): deny 설정이 들어간 exe에서 실제 두 턴 답변, 같은 외부 세션 이어쓰기, 재시작 복원 통과. 첫 답변은 모델이 "Plan Mode" 안내를 영어로 돌려줬어. 연결은 성공했지만 존댓말 지침을 따르지 않은 답변이야.
+- `npm test` → `91 passed; 0 failed`(신규 Claude 실패 스트림 테스트 포함). `npm run build:desktop` 통과(guiProbe 수정 반영, 같은 `esh-chat-mvp4.exe`).
+- 남은 것: Claude 정상 답변 캡처, Claude Lead 세션의 GUI 턴(같은 이유로 미실행), 실제 Arch 시간 초과 유도.
+
 ## worktree 동기화와 ARCHITECTURE.md의 schema v6 반영 (2026-10-27)
 
 - `bot/codex-impl`, `bot/anti-review`를 main(`fb4d842`)으로 fast-forward했어. 두 worktree 모두 커밋 안 된 변경과 `.automation.lock`이 없었어. 세 브랜치가 같은 커밋에서 출발해.
